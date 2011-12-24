@@ -154,8 +154,8 @@
 
 (define-unary-primitive %boolean? (x)
   (emit-expr x)
-  (emit "andq $3, %rax")
-  (emit "cmpq $0, %rax")
+  (emit "andq $47, %rax") ;; tag 00101111 = 47
+  (emit "cmpq $47, %rax") ;; 00101111 
   (emit "movq $0, %rax")
   (emit "sete %al")
   (emit "salq $4, %rax")
@@ -251,6 +251,13 @@
     (equal "#t" (run '(%null? nil) nil))
     (equal "#f" (run '(%null? 3) nil))
     (equal "#f" (run '(%null? 0) nil))
+
+    (equal "#t" (run '(%boolean? |#t|) nil))
+    (equal "#t" (run '(%boolean? |#f|) nil))
+    (equal "#f" (run '(%boolean? 4) nil))
+    (equal "#f" (run '(%boolean? -1) nil))
+    (equal "#f" (run '(%boolean? nil) nil))
+    (equal "#f" (run '(%boolean? #\a) nil))
 
     (equal "#t" (run '(%fixnum? 0) nil))
     (equal "#t" (run '(%fixnum? 4) nil))
