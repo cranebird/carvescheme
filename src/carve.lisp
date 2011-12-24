@@ -1,3 +1,6 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; carve.lisp
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (in-package :carve)
 
 (defvar *asm-output* t
@@ -168,14 +171,6 @@
   (emit "salq $4, %rax")
   (emit "orq $47, %rax") 
   )
-
-
-
-;; (define-unary-primitive %fixnum? (x)
-;;   (emit-expr x)
-;;   (emit "cmpq $0, %rax")
-;;   (emit "movq $0, %rax")
-;;   (emit "sete %al")
 
 (defun compile-program (x)
   (flet ((emit-header ()
