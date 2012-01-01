@@ -121,9 +121,14 @@
   (emit-expr x)
   (emit "addq $~a, %rax" (immediate-rep 1)))
 
+;;
+;; (setf r1 (op 'addq (reg r1) 4))
+
 (define-unary-primitive %sub1 (x)
   (emit-expr x)
   (emit "subq $~a, %rax" (immediate-rep 1)))
+
+;; (setf r1 (op 'subq (reg r1) 4))
 
 (define-unary-primitive %fixnum->char (x)
   (emit-expr x)
