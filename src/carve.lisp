@@ -124,12 +124,22 @@
            (emit "sete %~a" r))
           (('SAL v ('REG r))
            (emit "salq $~a, %~a" v r))
+          (('JE label)
+           (emit "je ~a" label))
+          (('JMP label)
+           (emit "jmp ~a" label))
+          (('DEFLABEL label)
+           (emit "~a:" label))
           (t
            (error "emit-asm error: ~a" ir))
           )
         (emit-asm (cdr ir)))))
+
+(defun genlabel ()
+  (gensym "Label"))
   
 (defun expr->ir (x)
+  "compile expression X into Carve IR."
   (let ((acc '(REG "rax")))
     (if(immediate-p x)
        `((SET ,acc ,(immediate-rep x)))
@@ -143,8 +153,7 @@
          (('%fixnum->char expr)
           `(,@(expr->ir expr)
               (SHL ,(- *char-shift* *fixnum-shift*) ,acc)
-              (OR ,*char-tag* ,acc)
-              ))
+              (OR ,*char-tag* ,acc)))
          (('%char->fixnum expr)
           `(,@(expr->ir expr)
               (SHR ,(- *char-shift* *fixnum-shift*) ,acc)))
@@ -178,81 +187,24 @@
               (SETE (REG "al"))
               (SAL 4 ,acc)
               (OR ,*scheme-f* ,acc)))
-         ))))
+         
+         (('if test conseq altern)
+          (let ((alt-label (genlabel))
+                (end-label (genlabel)))
+            `(,@(expr->ir test)
+                (CMP ,*scheme-f* ,acc)
+                (JE ,alt-label)
+                ,@(expr->ir conseq)
+                (JMP ,end-label)
+                (DEFLABEL ,alt-label)
+                ,@(expr->ir altern)
+                (DEFLABEL ,end-label)))
+          )
 
-(defun emit-expr (x)
-  (cond
-    ((immediate-p x)
-     (emit "movq $~a, %rax" (immediate-rep x)))
-    ((primcall-p x) ;; unary primitive
-     (emit-unary-primitive (primcall-op x) (primcall-operand1 x)))
-    (t
-     (error (make-condition 'scheme-compile-error
+         (t
+          (error (make-condition 'scheme-compile-error
                             :expr x :reason "unknown expr")))
-     ))
-
-(defgeneric emit-unary-primitive (name arg)
-  (:documentation "emit primitive"))
-
-(defmacro define-unary-primitive (opcode (arg) &rest body)
-  (let ((name (gensym)))
-  `(defmethod emit-unary-primitive ((,name (eql ',opcode)) ,arg)
-     ,@body)))
-
-(define-unary-primitive %add1 (x)
-  (emit-expr x)
-  (emit "addq $~a, %rax" (immediate-rep 1)))
-
-(define-unary-primitive %sub1 (x)
-  (emit-expr x)
-  (emit "subq $~a, %rax" (immediate-rep 1)))
-
-(define-unary-primitive %fixnum->char (x)
-  (emit-expr x)
-  (emit "shlq $~a, %rax" (- *char-shift* *fixnum-shift*))
-  (emit "orq $~a, %rax" *char-tag*))
-
-(define-unary-primitive %char->fixnum (x)
-  (emit-expr x)
-  (emit "shrq $~a, %rax" (- *char-shift* *fixnum-shift*)))
-
-(define-unary-primitive %zero? (x)
-  (emit-expr x)
-  (emit "cmpq $0, %rax")
-  (emit "movq $0, %rax")
-  (emit "sete %al")
-  (emit "salq $4, %rax")
-  (emit "orq $47, %rax") 
-  )
-
-(define-unary-primitive %null? (x)
-  (emit-expr x)
-  (emit "cmpq $79, %rax") ;; *empty-list*
-  (emit "movq $0, %rax")
-  (emit "sete %al")
-  (emit "salq $4, %rax")
-  (emit "orq $47, %rax") 
-  )
-
-(define-unary-primitive %boolean? (x)
-  (emit-expr x)
-  (emit "andq $47, %rax") ;; tag 00101111 = 47
-  (emit "cmpq $47, %rax") ;; 00101111 
-  (emit "movq $0, %rax")
-  (emit "sete %al")
-  (emit "salq $4, %rax")
-  (emit "orq $47, %rax") 
-  )
-
-(define-unary-primitive %fixnum? (x)
-  (emit-expr x)
-  (emit "andq $3, %rax")
-  (emit "cmpq $0, %rax")
-  (emit "movq $0, %rax")
-  (emit "sete %al")
-  (emit "salq $4, %rax")
-  (emit "orq $47, %rax") 
-  )
+         ))))
 
 (defun compile-program (x)
   (flet ((emit-header ()
@@ -263,8 +215,8 @@
            (emit "scheme_entry:")))
     (emit-header)
     (let ((ir (expr->ir x)))
-      (format *terminal-io* ";; Carve IR:~%~a~%" ir)
-      (format *terminal-io* ";; End~%")
+      (format *terminal-io* ";;;; Carve IR:~%~a~%" ir)
+      (format *terminal-io* ";;;; End Carve IR~%")
       (emit-asm ir)
       (emit "ret")
       )))
@@ -298,6 +250,9 @@
   (load-scheme-entry)
   (let ((val (scheme-entry)))
     (format out "~a" (format-scheme-value val))))
+
+(defun run* (x)
+  (run x nil))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; test
@@ -360,4 +315,14 @@
            (run `(%add1 ,(1- most-positive-immediate-integer)) nil))
     (equal (format nil "~a" most-negative-immediate-integer)
            (run `(%sub1 ,(1+ most-negative-immediate-integer)) nil))
+    ))
+
+(deftest test-if ()
+  (check
+    (equal "#t" (run '(if |#t| |#t| |#f|) nil))
+    (equal "#f" (run '(if |#f| |#t| |#f|) nil))
+    (equal "3" (run '(if |#t| 3 4) nil))
+    (equal "4" (run '(if |#f| 3 4) nil))
+    (equal "6" (run '(if |#t| (%add1 5) 4) nil))
+    (equal "9" (run '(if |#f| (%add1 5) (%add1 8)) nil))
     ))
