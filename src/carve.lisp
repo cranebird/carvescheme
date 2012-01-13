@@ -100,30 +100,52 @@
       (eql x '|#f|)
       ))
 
-(defun collect-register (ir regs)
-  (if (null ir)
-      (reverse regs)
-      (if (consp ir)
-          (match (car ir)
-            ((op ('REG r1) ('REG r2))
-             (declare (ignore op))
-             (collect-register (cdr ir) (progn
-                                          (pushnew r2 regs)
-                                          (pushnew r1 regs)
-                                          regs)))
-            ((op ('REG r) res)
-             (declare (ignore op res))
-             (collect-register (cdr ir) (progn
-                                          (pushnew r regs)
-                                          regs)))
-            ((op res ('REG r))
-             (declare (ignore op res))
-             (collect-register (cdr ir) (progn
-                                          (pushnew r regs)
-                                          regs)))
-            (t
-             (collect-register (cdr ir) regs)))
-          nil)))
+(defun collect-register (ir)
+  (loop for insn in ir with regs
+     do
+       (match insn
+         ((op ('REG r1) ('REG r2))
+          (declare (ignore op))
+          (pushnew r2 regs)
+          (pushnew r1 regs))
+
+         ((op ('REG r) res)
+          (declare (ignore op res))
+          (pushnew r regs))
+                                       
+         ((op res ('REG r))
+          (declare (ignore op res))
+          (pushnew r regs))
+
+         (t
+          nil))
+     finally
+       (return (reverse regs))))
+
+;; (defun collect-register (ir regs)
+;;   (if (null ir)
+;;       (reverse regs)
+;;       (if (consp ir)
+;;           (match (car ir)
+;;             ((op ('REG r1) ('REG r2))
+;;              (declare (ignore op))
+;;              (collect-register (cdr ir) (progn
+;;                                           (pushnew r2 regs)
+;;                                           (pushnew r1 regs)
+;;                                           regs)))
+;;             ((op ('REG r) res)
+;;              (declare (ignore op res))
+;;              (collect-register (cdr ir) (progn
+;;                                           (pushnew r regs)
+;;                                           regs)))
+;;             ((op res ('REG r))
+;;              (declare (ignore op res))
+;;              (collect-register (cdr ir) (progn
+;;                                           (pushnew r regs)
+;;                                           regs)))
+;;             (t
+;;              (collect-register (cdr ir) regs)))
+;;           nil)))
 
 (defun flatten (x)
   (cond
@@ -135,33 +157,85 @@
      (append (flatten (car x)) (flatten (cdr x))))))
 
 (defun analyze-liveness (ir)
+  "analyze liveness for IR. return list of (register start end)."
   (loop for insn in ir for i from 0
      with exists = (make-hash-table)
      do
        (loop for x in (flatten insn)
-          if (and (symbolp x) (not (find-symbol (symbol-name x))))
-          do
-            (push i (gethash x exists)))
+          if (register-symbol-p x)
+          do (push i (gethash x exists)))
      finally
-       (return (loop for k being the hash-keys in exists
-                  collect
-                    (list k (apply #'min (gethash k exists)) (apply #'max (gethash k exists)))))))
+       (return 
+         (loop for k being the hash-keys in exists
+            collect
+              (list k (apply #'min (gethash k exists)) (apply #'max (gethash k exists)))))))
+
+(defun write-register-interference-graph (ir)
+  
+  )
+
+(defun interference-p (liveness1 liveness2)
+  "return non-nil if liveness1 and liveness2 are inteferenced."
+  (let ((s1 (nth 1 liveness1))
+        (e1 (nth 2 liveness1))
+        (s2 (nth 1 liveness2))
+        (e2 (nth 2 liveness2)))
+    (assert (and (>= e1 s1) (>= e2 s2)))
+    (or
+     (and (< s2 s1) (> e2 s1))
+     (and (>= s2 s1) (< s2 e1)))))
+
+(defun print-rig (ir stream)
+  (format stream "graph ig {~%")
+  (format stream "graph[charset=\"UTF-8\"];~%")
+  (format stream "node[shape=circle];~%")
+  (let ((regs (collect-register ir))
+        (liveness (analyze-liveness ir))
+        (done nil))
+    (loop for r0 in regs for r0range = (assoc r0 liveness)
+       do
+         (loop for r1 in regs
+            for r1range = (assoc r1 liveness)
+            if (and (not (eql r0 r1))
+                    (interference-p r0range r1range)
+                    (not (member r1 done)))
+            do
+              (format t "~a -- ~a;~%" r0 r1))
+         (pushnew r0 done)))
+  (format stream "}~%"))
 
 (defun dump-hash (ht)
   (loop for k being the hash-keys in ht
      do (format t "~a => ~a~%" k (gethash k ht))))
 
-(defun allocate-register (ir) ;; simple ver.
-  (let ((vregs (collect-register ir nil))
-        (pregs '("rax" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"))
-        (regmap (make-hash-table)))
-    (assert (>= (length pregs) (length vregs)))
-    (loop for vr in vregs for pr in pregs
-       do (setf (gethash vr regmap) pr))
-    (dump-hash regmap)
-    ;; todo optimize register
-    (allocate-register-iter ir regmap)
-    ))
+(defun linear-scan-allocation (ir registers)
+  (let ((liveness (sort (analyze-liveness ir) #'< :key (lambda (x) (nth 1 x))))
+        (assigned (make-hash-table :test #'equal)))
+    (setf (gethash "rax" assigned) "rax") ;; 暫定。rax は再アロケートしない
+    (flet ((startpoint (r)
+             (nth 1 (assoc r liveness)))
+           (endpoint (r)
+             (nth 2 (assoc r liveness))))
+      (loop for (r startpoint endpoint) in liveness with active = nil
+         with free = (copy-seq registers)
+         unless (equal r "rax")
+         do
+           (loop named active-loop for ar in (copy-seq active)
+              do
+                (when (>= (endpoint ar) (startpoint r))
+                  (return-from active-loop nil))
+                (setf active (remove ar active))
+                (push (gethash ar assigned) free))
+           (let ((reg (pop free)))
+             (unless reg
+               (warn "fail to allocate register!"))
+             (setf (gethash r assigned) reg))
+           (push r active)
+           (setf active (sort active #'< :key #'endpoint)))
+      assigned)))
+
+(defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
+  (allocate-register-iter ir (linear-scan-allocation ir regs)))
 
 (defun allocate-register-iter (ir regmap)
   (if (consp ir)
@@ -185,10 +259,16 @@
       nil
       (progn
         (match (car ir)
+          (('SET ('REG r1) ('REG r0)) ;; SET dest source
+           (emit "movq %~a, %~a" r0 r1)) ;; movq source dest
           (('SET ('REG r) v) ;; SET dest source
-           (emit "movq $~a, %~a" v r))
+           (emit "movq $~a, %~a" v r)) ;; movq
+          (('ADD ('REG r1) ('REG r0)) ;; ADD source dest
+           (emit "addq %~a, %~a" r1 r0)) ;; addq source,dest
           (('ADD v ('REG r)) ;; ADD source dest
            (emit "addq $~a, %~a" v r))
+          (('SUB ('REG r1) ('REG r0)) ;; SUB source dest
+           (emit "subq %~a, %~a" r1 r0))
           (('SUB v ('REG r)) ;; SUB source dest
            (emit "subq $~a, %~a" v r))
           (('SHL v ('REG r))
@@ -212,7 +292,7 @@
           (('DEFLABEL label)
            (emit "~a:" label))
           (t
-           (error "emit-asm error: ~a" ir))
+           (error "emit-asm error unmatch expression: ~a" ir))
           )
         (emit-asm (cdr ir)))))
 
@@ -220,7 +300,28 @@
   (gensym "Label"))
 
 (defun genreg ()
-  (gensym "r"))
+  (gensym "reg"))
+
+(defun specific-symbol-p (x thing)
+  (and (symbolp x)
+       (let ((name (symbol-name x))
+             (len (length thing)))
+         (and
+          (not (find-symbol name))
+          (> (length name) len)
+          (equal (subseq name 0 len) thing)))))
+
+(defvar *x86-64-registers*
+  (list "rax" "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"))
+
+(defun register-symbol-p (x)
+  (or (specific-symbol-p x "reg") 
+      ;;(equal x "rax")
+      (member x *x86-64-registers* :test #'equal)
+      ))
+
+(defun label-symbol-p (x)
+  (specific-symbol-p x "Label"))
 
 (defun expr->ir (x &optional (acc (genreg)))
   "compile expression X into Carve IR."
@@ -284,101 +385,36 @@
         (('if test conseq altern)
          (let ((alt-label (genlabel))
                (end-label (genlabel)))
-           `(,@(expr->ir test)
+           `(,@(expr->ir test acc)
                (CMP ,*scheme-f* (REG ,acc))
                (JE ,alt-label)
-               ,@(expr->ir conseq)
+               ,@(expr->ir conseq acc)
                (JMP ,end-label)
                (DEFLABEL ,alt-label)
-               ,@(expr->ir altern)
-               (DEFLABEL ,end-label)))
-         )
+               ,@(expr->ir altern acc)
+               (DEFLABEL ,end-label))))
+        
+        (('%+ expr1 expr2)
+         (let ((r1 (genreg))
+               (r2 (genreg)))
+           `(,@(expr->ir expr2 r2)
+               ,@(expr->ir expr1 r1)
+               (ADD (REG ,r2) (REG ,r1))
+               (SET (REG ,acc) (REG ,r1)))))
+
+        (('%- expr1 expr2)
+         (let ((r1 (genreg))
+               (r2 (genreg)))
+           `(,@(expr->ir expr2 r2)
+               ,@(expr->ir expr1 r1)
+               (SUB (REG ,r2) (REG ,r1))
+               (SET (REG ,acc) (REG ,r1)))))
 
         (t
          (error (make-condition 'scheme-compile-error
-                                :expr x :reason "unknown expr")))
-        )))
+                                :expr x :reason "unknown expr"))))))
+        
   
-;; (defun expr->ir (x &optional reg)
-;;   "compile expression X into Carve IR."
-;;   (let ((acc '(REG "rax")))
-;;     (if (immediate-p x)
-;;         `((SET ,(or reg acc) ,(immediate-rep x)))
-;;         (match x
-;;           (('%add1 expr)
-;;            (cond
-;;              ((immediate-p expr)
-;;               (let ((r1 (genreg)))
-;;                 `((SET (REG ,r1) ,(immediate-rep expr))
-;;                   (SET (REG ,acc) (ADD ,(immediate-rep 1) (REG ,r1))))))
-;;              (t
-;;               (let ((r1 (genreg)))
-;;                 `(,@(expr->ir expr r1)
-;;                     (SET (REG ,acc) (ADD ,(immediate-rep 1) (REG ,r1)))))
-;;               ))
-;;            ;; `(,@(expr->ir expr)
-;;            ;;     (ADD ,(immediate-rep 1) ,acc))
-;;            )
-
-;;           (('%sub1 expr)
-;;            `(,@(expr->ir expr)
-;;                (SUB ,(immediate-rep 1) ,acc)))
-;;           (('%fixnum->char expr)
-;;            `(,@(expr->ir expr)
-;;                (SHL ,(- *char-shift* *fixnum-shift*) ,acc)
-;;                (OR ,*char-tag* ,acc)))
-;;           (('%char->fixnum expr)
-;;            `(,@(expr->ir expr)
-;;                (SHR ,(- *char-shift* *fixnum-shift*) ,acc)))
-;;           (('%zero? expr)
-;;            `(,@(expr->ir expr)
-;;                (CMP 0 ,acc)
-;;                (SET ,acc 0)
-;;                (SETE (REG "al"))
-;;                (SAL 4 ,acc)
-;;                (OR ,*scheme-f* ,acc)))
-;;           (('%null? expr)
-;;            `(,@(expr->ir expr)
-;;                (CMP ,*empty-list* ,acc)
-;;                (SET ,acc 0)
-;;                (SETE (REG "al"))
-;;                (SAL 4 ,acc)
-;;                (OR ,*scheme-f* ,acc)))
-;;           (('%boolean? expr)
-;;            `(,@(expr->ir expr)
-;;                (AND ,*scheme-f* ,acc)
-;;                (CMP ,*scheme-f* ,acc)
-;;                (SET ,acc 0)
-;;                (SETE (REG "al"))
-;;                (SAL 4 ,acc)
-;;                (OR ,*scheme-f* ,acc)))
-;;           (('%fixnum? expr)
-;;            `(,@(expr->ir expr)
-;;                (AND ,3 ,acc)
-;;                (CMP ,0 ,acc)
-;;                (SET ,acc 0)
-;;                (SETE (REG "al"))
-;;                (SAL 4 ,acc)
-;;                (OR ,*scheme-f* ,acc)))
-          
-;;           (('if test conseq altern)
-;;            (let ((alt-label (genlabel))
-;;                  (end-label (genlabel)))
-;;              `(,@(expr->ir test)
-;;                  (CMP ,*scheme-f* ,acc)
-;;                  (JE ,alt-label)
-;;                  ,@(expr->ir conseq)
-;;                  (JMP ,end-label)
-;;                  (DEFLABEL ,alt-label)
-;;                  ,@(expr->ir altern)
-;;                  (DEFLABEL ,end-label)))
-;;            )
-
-;;           (t
-;;            (error (make-condition 'scheme-compile-error
-;;                                   :expr x :reason "unknown expr")))
-;;           ))))
-
 (defun compile-program (x)
   (flet ((emit-header ()
            (emit "	.text")
@@ -387,7 +423,7 @@
            (emit "	.type	scheme_entry, @function")
            (emit "scheme_entry:")))
     (emit-header)
-    (let* ((ir0 (expr->ir x))
+    (let* ((ir0 (expr->ir x "rax"))
            (ir1 (allocate-register ir0)))
       (format *terminal-io* ";;;; Carve IR0:~%~a~%" ir0)
       (format *terminal-io* ";;;; End Carve IR0~%")
@@ -490,8 +526,7 @@
     (equal (format nil "~a" most-positive-immediate-integer)
            (run `(%add1 ,(1- most-positive-immediate-integer)) nil))
     (equal (format nil "~a" most-negative-immediate-integer)
-           (run `(%sub1 ,(1+ most-negative-immediate-integer)) nil))
-    ))
+           (run `(%sub1 ,(1+ most-negative-immediate-integer)) nil))))
 
 (deftest test-if ()
   (check
@@ -503,23 +538,38 @@
     (equal "9" (run '(if |#f| (%add1 5) (%add1 8)) nil))
     ))
 
+(deftest test-+ ()
+  (check
+    (equal "3" (run '(%+ 1 2) nil))
+    (equal "4" (run '(%+ -1 5) nil))
+    (equal "10" (run '(%+ 10 0) nil))
+    (equal "7" (run '(%+ (%+ 1 2) 4)  nil))
+    (equal "7" (run '(%+ (%+ 1 2) (%+ 3 1))  nil))
+    (equal "7" (run '(%+ (%add1 2) 4)  nil))
+    (equal "8" (run '(%+ (%add1 2) (%add1 4))  nil))
+
+    ))
+    
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun dump-ir (ir)
-  (loop for insn in ir for i from 0
-     do (format t ";;[~a] ~a~%" i insn))
-  (values))
+  (let ((regs (collect-register ir)))
+    (format t ";; Carve IR: insn: ~a reg: ~a~%" (length ir) (length regs))
+    (loop for insn in ir for i from 0
+       do (format t ";;[~a] ~a~%" i insn))
+    (values)))
 
 (defun write-liveness-graph (ir)
   (with-open-file (out *liveness-file* :direction :output
                        :if-exists :supersede)
+    (dump-ir ir)
     (write-liveness-graph-data ir out)))
 
-
 (defun write-liveness-graph-data (ir out)
-  (let ((regs (collect-register ir nil))
+  (let ((regs (collect-register ir))
         (liveness (analyze-liveness ir)))
     (let ((num-reg (length regs))
           (num-code (1+ (apply #'max (flatten (mapcar #'cdr liveness))))))
