@@ -102,28 +102,6 @@
       (eql x '|#f|)
       ))
 
-;; (defun collect-register (ir)
-;;   (loop for insn in ir with regs
-;;      do
-;;        (match insn
-;;          ((op ('REG r1) ('REG r2))
-;;           (declare (ignore op))
-;;           (pushnew r2 regs)
-;;           (pushnew r1 regs))
-
-;;          ((op ('REG r) res)
-;;           (declare (ignore op res))
-;;           (pushnew r regs))
-                                       
-;;          ((op res ('REG r))
-;;           (declare (ignore op res))
-;;           (pushnew r regs))
-
-;;          (t
-;;           nil))
-;;      finally
-;;        (return (reverse regs))))
-
 (defun collect-register (ir)
   (match ir
     (('REG r)
@@ -131,8 +109,8 @@
     (t
      (if (consp ir)
          (remove-duplicates 
-          (append (collect-register-iter (car ir))
-                  (collect-register-iter (cdr ir))))
+          (append (collect-register (car ir))
+                  (collect-register (cdr ir))))
          nil))))
 
 (defun flatten (x)
@@ -196,45 +174,69 @@
   (loop for k being the hash-keys in ht
      do (format t "~a => ~a~%" k (gethash k ht))))
 
-(defun linear-scan-allocation (ir registers)
-  (let ((liveness (sort (analyze-liveness ir) #'< :key (lambda (x) (nth 1 x))))
-        (assigned (make-hash-table :test #'equal)))
-    (flet ((startpoint (r)
-             (nth 1 (assoc r liveness)))
-           (endpoint (r)
-             (nth 2 (assoc r liveness))))
-      (loop for (r startpoint endpoint) in liveness with active = nil
-         with free = (copy-seq registers)
-         unless (member r *x86-64-registers* :test #'equal) ;; 実レジスタは再アロケートしない
-         do
-           (loop named active-loop for ar in (copy-seq active)
-              do
-                (when (>= (endpoint ar) (startpoint r))
-                  (return-from active-loop nil))
-                (setf active (remove ar active))
-                (push (gethash ar assigned) free))
-           (let ((reg (pop free)))
-             (unless reg
-               (warn "fail to allocate register!"))
-             (setf (gethash r assigned) reg))
-           (push r active)
-           (setf active (sort active #'< :key #'endpoint)))
-      assigned)))
+(defun linear-scan-allocation (ir registers liveness)
+  (flet ((startpoint (r)
+           (nth 1 (assoc r liveness)))
+         (endpoint (r)
+           (nth 2 (assoc r liveness))))
+    (loop for (r startpoint endpoint) in liveness with active = nil
+       with free = (copy-seq registers)
+       with assigned = (make-hash-table :test #'equal)
+       unless (member r *x86-64-registers* :test #'equal) ;; 実レジスタは再アロケートしない
+       do
+         (loop named active-loop for ar in (copy-seq active)
+            do
+              (when (>= (endpoint ar) (startpoint r))
+                (return-from active-loop nil))
+              (setf active (remove ar active))
+              (push (gethash ar assigned) free))
+         (let ((reg (pop free)))
+           (if reg
+               (setf (gethash r assigned) reg)
+               (warn "fail to allocate register!")))
+         (push r active)
+         (setf active (sort active #'< :key #'endpoint))
+       finally
+         (return assigned))))
 
 (defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
                                                    "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
-  (allocate-register-iter ir (linear-scan-allocation ir regs)))
+  (let* ((liveness (sort (analyze-liveness ir) #'< :key (lambda (x) (nth 1 x))))
+         (assigned (linear-scan-allocation ir regs liveness))
+         )
+    (allocate-register-iter ir assigned)))
+
+(defun replace-all-registers (insn regmap)
+  (match insn
+    (('REG r)
+     `(REG ,(gethash r regmap r))) ;; fixme
+    (t
+     (if (consp insn)
+         (cons (replace-all-registers (car insn) regmap)
+               (replace-all-registers (cdr insn) regmap))
+         insn))))
 
 (defun allocate-register-iter (ir regmap)
-  (match ir
-    (('REG r)
-     `(REG ,(gethash r regmap r)))
-    (t
-     (if (consp ir)
-         (cons (allocate-register-iter (car ir) regmap)
-               (allocate-register-iter (cdr ir) regmap))
-         ir))))
-
+  (loop for insn in ir with new-ir
+     for regs = (loop for r in (collect-register insn)
+                     unless (member r *x86-64-registers* :test #'equal)
+                     collect r)
+     do
+       (warn "collected-regs in insn ~a: ~a" insn regs)
+       (cond
+         ((null regs)
+          (push insn new-ir))
+         ((every (lambda (r)
+                   (gethash r regmap)) regs)
+          (warn "replace ~a..." regs)
+          (push (replace-all-registers insn regmap) new-ir))
+         (t ;; emit stack op
+          (warn "found not assigned: ~a" regs)
+          (push insn new-ir)
+          ))
+     finally
+       (return (reverse new-ir))))
+         
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; x86_64 and Carve IR
 ;; movq source, dest
@@ -254,25 +256,27 @@
       nil
       (progn
         (match (car ir)
-          (('SET ('REG r1) ('REG r0)) ;; SET dest source
-           (emit "movq %~a, %~a" r0 r1)) ;; movq source dest
-          (('SET ('REG r) v) ;; SET dest source
-           (emit "movq $~a, %~a" v r)) ;; movq
-          (('SET (('REG r0) disp) ('REG r1))
+          (('SET ('REG r1) ('REG r0))
+           (emit "movq %~a, %~a" r0 r1))
+          (('SET ('REG r) v)
+           (emit "movq $~a, %~a" v r))
+          (('SET (('REG r0) disp) ('REG r1)) ;; 間接参照
            (emit "movq %~a, ~a(%~a)" r1 disp r0))
+          (('SET (('REG r0) disp) v) ;; 間接参照
+           (emit "movq %~a, ~a(%~a)" v disp r0))
 
-          (('ADD ('REG r1) ('REG r0)) ;; ADD source dest
-           (emit "addq %~a, %~a" r1 r0)) ;; addq source,dest
-          (('ADD (('REG r1) disp) ('REG r0)) ;; ADD source dest
+          (('ADD ('REG r1) ('REG r0))
+           (emit "addq %~a, %~a" r1 r0))
+          (('ADD (('REG r1) disp) ('REG r0))
            (emit "addq ~a(%~a), %~a" disp r1 r0))
-
-          (('ADD v ('REG r)) ;; ADD source dest
+          (('ADD v ('REG r))
            (emit "addq $~a, %~a" v r))
 
-          (('SUB ('REG r1) ('REG r0)) ;; SUB source dest
+          (('SUB ('REG r1) ('REG r0))
            (emit "subq %~a, %~a" r1 r0))
-          (('SUB v ('REG r)) ;; SUB source dest
+          (('SUB v ('REG r))
            (emit "subq $~a, %~a" v r))
+
           (('SHL v ('REG r))
            (emit "shlq $~a, %~a" v r))
           (('SHR v ('REG r))
@@ -315,6 +319,16 @@
 
 (defvar *x86-64-registers*
   (list "rax" "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; x86_64
+;; 64-bit registers
+;; rax ; the accumulator
+;; rbx, rcx, rdx, rdi, rsi, r8, r9, r10, r11, r12, r13, r14, r15
+;; rbp ; the frame pointer
+;; rsp ; the stack pointer
+;; 8-bit registers
+;; al ;; TODO 命令との関係を整理すること
 
 (defun register-symbol-p (x)
   (or (specific-symbol-p x "reg") 
@@ -410,7 +424,7 @@
                (SUB (REG ,r2) (REG ,r1))
                (SET (REG ,acc) (REG ,r1)))))
 
-        (('plus expr1 expr2)
+        (('plus expr1 expr2) ;; 
          `(,@(expr->ir expr2 si acc)
              (SET ((REG "rsp") ,si) (REG ,acc)) ;; base register, displ  => -si(%rsp)
              ,@(expr->ir expr1 (- si *word-size*) acc)
