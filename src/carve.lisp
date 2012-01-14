@@ -6,6 +6,8 @@
 (defvar *asm-output* t
   "write assembler to this stream.")
 
+(defvar *word-size* 8)
+
 (defvar *fixnum-tag* #b00)
 (defvar *fixnum-shift* 2)
 (defvar *fixnum-mask* #b11)
@@ -100,52 +102,38 @@
       (eql x '|#f|)
       ))
 
-(defun collect-register (ir)
-  (loop for insn in ir with regs
-     do
-       (match insn
-         ((op ('REG r1) ('REG r2))
-          (declare (ignore op))
-          (pushnew r2 regs)
-          (pushnew r1 regs))
+;; (defun collect-register (ir)
+;;   (loop for insn in ir with regs
+;;      do
+;;        (match insn
+;;          ((op ('REG r1) ('REG r2))
+;;           (declare (ignore op))
+;;           (pushnew r2 regs)
+;;           (pushnew r1 regs))
 
-         ((op ('REG r) res)
-          (declare (ignore op res))
-          (pushnew r regs))
+;;          ((op ('REG r) res)
+;;           (declare (ignore op res))
+;;           (pushnew r regs))
                                        
-         ((op res ('REG r))
-          (declare (ignore op res))
-          (pushnew r regs))
+;;          ((op res ('REG r))
+;;           (declare (ignore op res))
+;;           (pushnew r regs))
 
-         (t
-          nil))
-     finally
-       (return (reverse regs))))
+;;          (t
+;;           nil))
+;;      finally
+;;        (return (reverse regs))))
 
-;; (defun collect-register (ir regs)
-;;   (if (null ir)
-;;       (reverse regs)
-;;       (if (consp ir)
-;;           (match (car ir)
-;;             ((op ('REG r1) ('REG r2))
-;;              (declare (ignore op))
-;;              (collect-register (cdr ir) (progn
-;;                                           (pushnew r2 regs)
-;;                                           (pushnew r1 regs)
-;;                                           regs)))
-;;             ((op ('REG r) res)
-;;              (declare (ignore op res))
-;;              (collect-register (cdr ir) (progn
-;;                                           (pushnew r regs)
-;;                                           regs)))
-;;             ((op res ('REG r))
-;;              (declare (ignore op res))
-;;              (collect-register (cdr ir) (progn
-;;                                           (pushnew r regs)
-;;                                           regs)))
-;;             (t
-;;              (collect-register (cdr ir) regs)))
-;;           nil)))
+(defun collect-register (ir)
+  (match ir
+    (('REG r)
+     (list r))
+    (t
+     (if (consp ir)
+         (remove-duplicates 
+          (append (collect-register-iter (car ir))
+                  (collect-register-iter (cdr ir))))
+         nil))))
 
 (defun flatten (x)
   (cond
@@ -211,14 +199,13 @@
 (defun linear-scan-allocation (ir registers)
   (let ((liveness (sort (analyze-liveness ir) #'< :key (lambda (x) (nth 1 x))))
         (assigned (make-hash-table :test #'equal)))
-    (setf (gethash "rax" assigned) "rax") ;; 暫定。rax は再アロケートしない
     (flet ((startpoint (r)
              (nth 1 (assoc r liveness)))
            (endpoint (r)
              (nth 2 (assoc r liveness))))
       (loop for (r startpoint endpoint) in liveness with active = nil
          with free = (copy-seq registers)
-         unless (equal r "rax")
+         unless (member r *x86-64-registers* :test #'equal) ;; 実レジスタは再アロケートしない
          do
            (loop named active-loop for ar in (copy-seq active)
               do
@@ -234,24 +221,32 @@
            (setf active (sort active #'< :key #'endpoint)))
       assigned)))
 
-(defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
+(defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
+                                                   "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
   (allocate-register-iter ir (linear-scan-allocation ir regs)))
 
 (defun allocate-register-iter (ir regmap)
-  (if (consp ir)
-      (loop for insn in ir
-         collect (match insn
-                   (('REG r)
-                    `(REG ,(gethash r regmap)))
-                   ((op ('REG r1) ('REG r2))
-                    `(,op (REG ,(gethash r1 regmap)) (REG ,(gethash r2 regmap))))
-                   ((op ('REG r) res)
-                    `(,op (REG ,(gethash r regmap)) ,(allocate-register-iter res regmap)))
-                   ((op res ('REG r))
-                    `(,op ,res (REG ,(gethash r regmap))))
-                   (t
-                    insn)))
-      ir))
+  (match ir
+    (('REG r)
+     `(REG ,(gethash r regmap r)))
+    (t
+     (if (consp ir)
+         (cons (allocate-register-iter (car ir) regmap)
+               (allocate-register-iter (cdr ir) regmap))
+         ir))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; x86_64 and Carve IR
+;; movq source, dest
+;; addq
+;; subq
+;; shlq
+;; orq
+;; andq
+;; sete
+;; salq
+;; jump
+;; je
 
 (defun emit-asm (ir)
   (assert (or (null ir) (consp ir)) (ir) "emit-ir: except cons, but got: ~a" ir)
@@ -263,10 +258,17 @@
            (emit "movq %~a, %~a" r0 r1)) ;; movq source dest
           (('SET ('REG r) v) ;; SET dest source
            (emit "movq $~a, %~a" v r)) ;; movq
+          (('SET (('REG r0) disp) ('REG r1))
+           (emit "movq %~a, ~a(%~a)" r1 disp r0))
+
           (('ADD ('REG r1) ('REG r0)) ;; ADD source dest
            (emit "addq %~a, %~a" r1 r0)) ;; addq source,dest
+          (('ADD (('REG r1) disp) ('REG r0)) ;; ADD source dest
+           (emit "addq ~a(%~a), %~a" disp r1 r0))
+
           (('ADD v ('REG r)) ;; ADD source dest
            (emit "addq $~a, %~a" v r))
+
           (('SUB ('REG r1) ('REG r0)) ;; SUB source dest
            (emit "subq %~a, %~a" r1 r0))
           (('SUB v ('REG r)) ;; SUB source dest
@@ -291,9 +293,9 @@
            (emit "jmp ~a" label))
           (('DEFLABEL label)
            (emit "~a:" label))
+
           (t
-           (error "emit-asm error unmatch expression: ~a" ir))
-          )
+           (error "emit-asm error unmatch expression: ~a" ir)))
         (emit-asm (cdr ir)))))
 
 (defun genlabel ()
@@ -316,14 +318,12 @@
 
 (defun register-symbol-p (x)
   (or (specific-symbol-p x "reg") 
-      ;;(equal x "rax")
-      (member x *x86-64-registers* :test #'equal)
-      ))
+      (member x *x86-64-registers* :test #'equal)))
 
 (defun label-symbol-p (x)
   (specific-symbol-p x "Label"))
 
-(defun expr->ir (x &optional (acc (genreg)))
+(defun expr->ir (x si &optional (acc (genreg)))
   "compile expression X into Carve IR."
   (if (immediate-p x)
       `((SET (REG ,acc) ,(immediate-rep x)))
@@ -334,7 +334,7 @@
             `((SET (REG ,acc) ,(immediate-rep expr))
               (ADD ,(immediate-rep 1) (REG ,acc))))
            (t
-            `(,@(expr->ir expr acc)
+            `(,@(expr->ir expr si acc)
                 (ADD ,(immediate-rep 1) (REG ,acc))))))
         (('%sub1 expr)
          (cond
@@ -342,31 +342,31 @@
             `((SET (REG ,acc) ,(immediate-rep expr))
               (SUB ,(immediate-rep 1) (REG ,acc))))
            (t
-            `(,@(expr->ir expr acc)
+            `(,@(expr->ir expr si acc)
                 (SUB ,(immediate-rep 1) (REG ,acc))))))
         (('%fixnum->char expr)
-         `(,@(expr->ir expr acc)
+         `(,@(expr->ir expr si acc)
              (SHL ,(- *char-shift* *fixnum-shift*) (REG ,acc))
              (OR ,*char-tag* (REG ,acc))))
         (('%char->fixnum expr)
-         `(,@(expr->ir expr acc)
+         `(,@(expr->ir expr si acc)
              (SHR ,(- *char-shift* *fixnum-shift*) (REG ,acc))))
         (('%zero? expr)
-         `(,@(expr->ir expr acc)
+         `(,@(expr->ir expr si acc)
              (CMP 0 (REG ,acc))
              (SET (REG ,acc) 0)
              (SETE (REG "al"))
              (SAL 4 (REG ,acc))
              (OR ,*scheme-f* (REG ,acc))))
         (('%null? expr)
-         `(,@(expr->ir expr acc)
+         `(,@(expr->ir expr si acc)
              (CMP ,*empty-list* (REG ,acc))
              (SET (REG ,acc) 0)
              (SETE (REG "al"))
              (SAL 4 (REG ,acc))
              (OR ,*scheme-f* (REG ,acc))))
         (('%boolean? expr)
-         `(,@(expr->ir expr acc)
+         `(,@(expr->ir expr si acc)
              (AND ,*scheme-f* (REG ,acc))
              (CMP ,*scheme-f* (REG ,acc))
              (SET (REG ,acc) 0)
@@ -374,7 +374,7 @@
              (SAL 4 (REG ,acc))
              (OR ,*scheme-f* (REG ,acc))))
         (('%fixnum? expr)
-         `(,@(expr->ir expr acc)
+         `(,@(expr->ir expr si acc)
              (AND ,3 (REG ,acc))
              (CMP ,0 (REG ,acc))
              (SET (REG ,acc) 0)
@@ -385,50 +385,58 @@
         (('if test conseq altern)
          (let ((alt-label (genlabel))
                (end-label (genlabel)))
-           `(,@(expr->ir test acc)
+           `(,@(expr->ir test si acc)
                (CMP ,*scheme-f* (REG ,acc))
                (JE ,alt-label)
-               ,@(expr->ir conseq acc)
+               ,@(expr->ir conseq si acc)
                (JMP ,end-label)
                (DEFLABEL ,alt-label)
-               ,@(expr->ir altern acc)
+               ,@(expr->ir altern si acc)
                (DEFLABEL ,end-label))))
         
         (('%+ expr1 expr2)
          (let ((r1 (genreg))
                (r2 (genreg)))
-           `(,@(expr->ir expr2 r2)
-               ,@(expr->ir expr1 r1)
+           `(,@(expr->ir expr2 si r2)
+               ,@(expr->ir expr1 si r1)
                (ADD (REG ,r2) (REG ,r1))
                (SET (REG ,acc) (REG ,r1)))))
 
         (('%- expr1 expr2)
          (let ((r1 (genreg))
                (r2 (genreg)))
-           `(,@(expr->ir expr2 r2)
-               ,@(expr->ir expr1 r1)
+           `(,@(expr->ir expr2 si r2)
+               ,@(expr->ir expr1 si r1)
                (SUB (REG ,r2) (REG ,r1))
                (SET (REG ,acc) (REG ,r1)))))
+
+        (('plus expr1 expr2)
+         `(,@(expr->ir expr2 si acc)
+             (SET ((REG "rsp") ,si) (REG ,acc)) ;; base register, displ  => -si(%rsp)
+             ,@(expr->ir expr1 (- si *word-size*) acc)
+             (ADD ((REG "rsp" ) ,si) (REG ,acc))))
 
         (t
          (error (make-condition 'scheme-compile-error
                                 :expr x :reason "unknown expr"))))))
         
-  
 (defun compile-program (x)
   (flet ((emit-header ()
            (emit "	.text")
            (emit "	.p2align 4,,15")
            (emit ".globl scheme_entry")
            (emit "	.type	scheme_entry, @function")
-           (emit "scheme_entry:")))
+           (emit "scheme_entry:"))
+         (print-info (ir stage)
+           (format *terminal-io* ";;; Carve IR ~a~%" stage)
+           (dump-ir ir *terminal-io*))
+         )
     (emit-header)
-    (let* ((ir0 (expr->ir x "rax"))
+    (let* ((si (- *word-size*))
+           (ir0 (expr->ir x si "rax"))
            (ir1 (allocate-register ir0)))
-      (format *terminal-io* ";;;; Carve IR0:~%~a~%" ir0)
-      (format *terminal-io* ";;;; End Carve IR0~%")
-      (format *terminal-io* ";;;; Carve IR1:~%~a~%" ir1)
-      (format *terminal-io* ";;;; End Carve IR1~%")
+      (print-info ir0 "IR0")
+      (print-info ir1 "IR1")
       (emit-asm ir1)
       (emit "ret")
       )))
@@ -555,11 +563,11 @@
 ;; Utility
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defun dump-ir (ir)
+(defun dump-ir (ir &optional (stream t))
   (let ((regs (collect-register ir)))
-    (format t ";; Carve IR: insn: ~a reg: ~a~%" (length ir) (length regs))
+    (format stream ";; insn: ~a reg: ~a~%" (length ir) (length regs))
     (loop for insn in ir for i from 0
-       do (format t ";;[~a] ~a~%" i insn))
+       do (format stream ";;[~a] ~a~%" i insn))
     (values)))
 
 (defun write-liveness-graph (ir)
