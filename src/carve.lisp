@@ -8,6 +8,29 @@
 
 (defvar *word-size* 8)
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; x86_64
+;; 64-bit registers
+;; rax ; the accumulator
+;; rbx, rcx, rdx, rdi, rsi, r8, r9, r10, r11, r12, r13, r14, r15
+;; rbp ; the frame pointer
+;; rsp ; the stack pointer
+;; 8-bit registers
+;; al ;; TODO 命令との関係を整理すること
+
+(defvar *x86-64-specific-register*
+  (list "rax" "rbp" "rsp" "al"))
+
+(defvar *x86-64-generic-register*
+  (list "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"))
+
+(defvar *x86-64-registers*
+  (list "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"
+        "rax" "rbp" "rsp" "al"))
+
+
+
+
 (defvar *fixnum-tag* #b00)
 (defvar *fixnum-shift* 2)
 (defvar *fixnum-mask* #b11)
@@ -27,8 +50,11 @@
 
 (defvar *asm-file* "/home/cranebird/carvescheme/src/asm.s")
 (defvar *scheme-entry-lib-file* "/home/cranebird/carvescheme/src/scm.lib")
+(defvar *scheme-entry-error-file* "/home/cranebird/carvescheme/src/scm.err")
+(defvar *scheme-entry-output-file* "/home/cranebird/carvescheme/src/scm.out")
 (defvar *scheme-driver-c-file* "/home/cranebird/carvescheme/src/driver.c")
 (defvar *scheme-driver-exe* "/home/cranebird/carvescheme/src/main")
+(defvar *scheme-driver-error-file* "/home/cranebird/carvescheme/src/main.err")
 
 (defvar *liveness-file* "/home/cranebird/carvescheme/src/liveness.ps")
 
@@ -113,6 +139,10 @@
                   (collect-register (cdr ir))))
          nil))))
 
+;; (defun collect-virtual-register (ir)
+;;   (loop for r in (collect-register ir)
+;;      unless (member r 
+
 (defun flatten (x)
   (cond
     ((null x)
@@ -136,9 +166,22 @@
             collect
               (list k (apply #'min (gethash k exists)) (apply #'max (gethash k exists)))))))
 
-(defun write-register-interference-graph (ir)
-  
-  )
+(defun analyze-liveness (ir)
+  "analyze liveness for IR. return list of (register start end)."
+  (loop with exists = (make-hash-table)
+     for insn in ir for i from 0
+     for regs = (collect-register insn)
+     do (loop for r in regs
+           if (register-symbol-p r)
+           do (push i (gethash r exists))
+           else
+           do (warn "in regs, but not register-symbol-p: ~a" r)
+             )
+     finally
+       (return 
+         (loop for k being the hash-keys in exists
+            collect
+              (list k (apply #'min (gethash k exists)) (apply #'max (gethash k exists)))))))
 
 (defun interference-p (liveness1 liveness2)
   "return non-nil if liveness1 and liveness2 are inteferenced."
@@ -174,14 +217,16 @@
   (loop for k being the hash-keys in ht
      do (format t "~a => ~a~%" k (gethash k ht))))
 
-(defun linear-scan-allocation (ir registers liveness)
+(defun calc-allocation-by-linear-scan (ir registers liveness si)
+  (declare (ignore ir))
   (flet ((startpoint (r)
            (nth 1 (assoc r liveness)))
          (endpoint (r)
            (nth 2 (assoc r liveness))))
     (loop for (r startpoint endpoint) in liveness with active = nil
-       with free = (copy-seq registers)
-       with assigned = (make-hash-table :test #'equal)
+       with pool = (mapcar #'(lambda (x)
+                               `(REG ,x)) (copy-seq registers))
+       with allocation = (make-hash-table :test #'equal)
        unless (member r *x86-64-registers* :test #'equal) ;; 実レジスタは再アロケートしない
        do
          (loop named active-loop for ar in (copy-seq active)
@@ -189,53 +234,67 @@
               (when (>= (endpoint ar) (startpoint r))
                 (return-from active-loop nil))
               (setf active (remove ar active))
-              (push (gethash ar assigned) free))
-         (let ((reg (pop free)))
-           (if reg
-               (setf (gethash r assigned) reg)
-               (warn "fail to allocate register!")))
+              (push (gethash ar allocation) pool))
+         (if pool
+             (setf (gethash r allocation) (pop pool))
+             (progn
+               (warn "fail to allocate register!")
+               (setf (gethash r allocation) `((REG "rsp") ,si))
+               (decf si *word-size*))
+             )
          (push r active)
          (setf active (sort active #'< :key #'endpoint))
        finally
-         (return assigned))))
+         (return allocation))))
 
 (defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
                                                    "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
   (let* ((liveness (sort (analyze-liveness ir) #'< :key (lambda (x) (nth 1 x))))
-         (assigned (linear-scan-allocation ir regs liveness))
-         )
-    (allocate-register-iter ir assigned)))
+         (si (- *word-size*)) ;; fixme まっとうな手段で si を得ること
+         (allocation (calc-allocation-by-linear-scan ir regs liveness si)))
+    (dump-hash allocation)
+    (allocate-register-iter ir allocation)))
 
-(defun replace-all-registers (insn regmap)
+(defun replace-all-registers (insn allocation)
   (match insn
     (('REG r)
-     `(REG ,(gethash r regmap r))) ;; fixme
+     (gethash r allocation `(REG ,r))) ;; fixme
     (t
      (if (consp insn)
-         (cons (replace-all-registers (car insn) regmap)
-               (replace-all-registers (cdr insn) regmap))
+         (cons (replace-all-registers (car insn) allocation)
+               (replace-all-registers (cdr insn) allocation))
          insn))))
 
+;; (defun generate-spill-code (insn si)
+;;   (match insn
+;;     (('SET ('REG vr) v)
+;;      `(SET ((REG "rsp") ,si) ,v))
+;;     (('ADD ('REG r0) ('REG r1))
+;;      `(ADD ((REG ,r0) ,si) (REG ,r1)))
+;;     (t
+;;      insn)))
+
+;;          (t ;; emit stack operation
+;;           (warn "INSN: ~a~%" insn)
+;;           (warn "found not assigned: ~a" vregs)
+;;           (let ((new-insn (generate-spil-code insn si)))
+;;             (setf si (- si *word-size*))
+;;             (list new-insn)))
+
 (defun allocate-register-iter (ir regmap)
-  (loop for insn in ir with new-ir
-     for regs = (loop for r in (collect-register insn)
-                     unless (member r *x86-64-registers* :test #'equal)
-                     collect r)
-     do
-       (warn "collected-regs in insn ~a: ~a" insn regs)
+  (loop for insn in ir
+     for vregs = (loop for r in (collect-register insn)
+                    unless (member r *x86-64-registers* :test #'equal)
+                    collect r)
+     append
        (cond
-         ((null regs)
-          (push insn new-ir))
-         ((every (lambda (r)
-                   (gethash r regmap)) regs)
-          (warn "replace ~a..." regs)
-          (push (replace-all-registers insn regmap) new-ir))
-         (t ;; emit stack op
-          (warn "found not assigned: ~a" regs)
-          (push insn new-ir)
-          ))
-     finally
-       (return (reverse new-ir))))
+         ((null vregs) ;; no register instruction.
+          (list insn))
+         ((every (lambda (r) (gethash r regmap)) vregs)
+          (list (replace-all-registers insn regmap)))
+         (t
+          (list insn)))))
+
          
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; x86_64 and Carve IR
@@ -258,17 +317,32 @@
         (match (car ir)
           (('SET ('REG r1) ('REG r0))
            (emit "movq %~a, %~a" r0 r1))
+          (('SET ('REG r1) (('REG r0) disp)) ;; 間接参照 fixme 存在?
+           (emit "movq ~a(%~a), %~a" disp r0 r1))
+
           (('SET ('REG r) v)
            (emit "movq $~a, %~a" v r))
           (('SET (('REG r0) disp) ('REG r1)) ;; 間接参照
            (emit "movq %~a, ~a(%~a)" r1 disp r0))
+
+          (('SET (('REG r0) disp0) (('REG r1) disp1)) ;; fixme 存在しない命令
+           (emit "movq ~a(%~a), ~a(%~a)" disp1 r1 disp0 r0))
+
           (('SET (('REG r0) disp) v) ;; 間接参照
-           (emit "movq %~a, ~a(%~a)" v disp r0))
+           (emit "movq $~a, ~a(%~a)" v disp r0))
 
           (('ADD ('REG r1) ('REG r0))
            (emit "addq %~a, %~a" r1 r0))
           (('ADD (('REG r1) disp) ('REG r0))
            (emit "addq ~a(%~a), %~a" disp r1 r0))
+
+          (('ADD ('REG r1) (('REG r0) disp))
+           (emit "addq %~a, ~a(%~a)" r1 disp r0))
+
+          (('ADD (('REG r1) disp1) (('REG r0) disp0))
+           ;; 存在しない命令
+           (emit "addq ~a(%~a), ~a(%~a)" disp1 r1 disp0 r0))
+
           (('ADD v ('REG r))
            (emit "addq $~a, %~a" v r))
 
@@ -316,19 +390,6 @@
           (not (find-symbol name))
           (> (length name) len)
           (equal (subseq name 0 len) thing)))))
-
-(defvar *x86-64-registers*
-  (list "rax" "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; x86_64
-;; 64-bit registers
-;; rax ; the accumulator
-;; rbx, rcx, rdx, rdi, rsi, r8, r9, r10, r11, r12, r13, r14, r15
-;; rbp ; the frame pointer
-;; rsp ; the stack pointer
-;; 8-bit registers
-;; al ;; TODO 命令との関係を整理すること
 
 (defun register-symbol-p (x)
   (or (specific-symbol-p x "reg") 
@@ -452,6 +513,7 @@
       (print-info ir0 "IR0")
       (print-info ir1 "IR1")
       (emit-asm ir1)
+
       (emit "ret")
       )))
 
@@ -459,9 +521,20 @@
   (with-open-file (*asm-output* *asm-file* :direction :output :if-exists :supersede)
     (compile-program x)))
 
+(defun make-scheme-library ()
+  (sb-ext:run-program "/usr/bin/gcc" `("-g" "-shared" ,*asm-file* "-o" ,*scheme-entry-lib-file*) 
+                      :error *scheme-entry-error-file* :if-error-exists :supersede
+                      :output *scheme-entry-output-file*  :if-output-exists :supersede))
+
+(defun make-scheme-exe ()
+  (let ((proc
+         (sb-ext:run-program "/usr/bin/gcc" `("-g" ,*asm-file* ,*scheme-driver-c-file* "-o" ,*scheme-driver-exe*)
+                             :error *terminal-io*)))
+    (unless (= 0 (sb-ext:process-exit-code proc))
+      (error "make-scheme-exe exit"))))
+                      
+
 (defun load-scheme-entry ()
-  (sb-ext:run-program "/usr/bin/gcc" `("-g" "-shared" ,*asm-file* "-o" ,*scheme-entry-lib-file*))
-  (sb-ext:run-program "/usr/bin/gcc" `("-g" ,*asm-file* ,*scheme-driver-c-file* "-o" ,*scheme-driver-exe*))
   (load-foreign-library *scheme-entry-lib-file*)
   (defcfun "scheme_entry" :int64))
 
@@ -479,11 +552,28 @@
     ((eql (logand val *char-mask*) *char-tag*)
      (format nil "#\\~a" (code-char (ash val (- *char-shift*)))))))
 
-(defun run (x &optional (out t))
+(defun run (x &optional (out t)) ;; Use C driver version.
   (write-asm x)
-  (load-scheme-entry)
-  (let ((val (scheme-entry)))
-    (format out "~a" (format-scheme-value val))))
+  ;; (make-scheme-library)
+  (handler-bind ((error
+                  #'(lambda (cond)
+                      (declare (ignore cond))
+                      (warn "Error. check *terminal-io*"))))
+    (make-scheme-exe)
+    ;; (load-scheme-entry)
+    (let ((str
+           (with-output-to-string (o)
+             (sb-ext:run-program *scheme-driver-exe* nil :output o))))
+      (format out "~a" str))))
+
+;;; cffi version.
+;; (defun run (x &optional (out t))
+;;   (write-asm x)
+;;   (make-scheme-library)
+;;   (make-scheme-exe)
+;;   (load-scheme-entry)
+;;   (let ((val (scheme-entry)))
+;;     (format out "~a" (format-scheme-value val))))
 
 (defun run* (x)
   (run x nil))
@@ -570,6 +660,14 @@
     (equal "7" (run '(%+ (%add1 2) 4)  nil))
     (equal "8" (run '(%+ (%add1 2) (%add1 4))  nil))
 
+    ))
+
+(deftest test-high-register-pressure ()
+  (check
+    (equal "105"
+           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)  nil))
+    (equal "120"
+           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15)  nil))
     ))
     
 
