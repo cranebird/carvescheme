@@ -129,19 +129,15 @@
       ))
 
 (defun collect-register (ir)
+  "return list of register name in the IR."
   (match ir
-    (('REG r)
-     (list r))
+    (('REG r) (list r))
     (t
      (if (consp ir)
          (remove-duplicates 
           (append (collect-register (car ir))
                   (collect-register (cdr ir))))
          nil))))
-
-;; (defun collect-virtual-register (ir)
-;;   (loop for r in (collect-register ir)
-;;      unless (member r 
 
 (defun flatten (x)
   (cond
@@ -152,19 +148,7 @@
     (t
      (append (flatten (car x)) (flatten (cdr x))))))
 
-(defun analyze-liveness (ir)
-  "analyze liveness for IR. return list of (register start end)."
-  (loop for insn in ir for i from 0
-     with exists = (make-hash-table)
-     do
-       (loop for x in (flatten insn)
-          if (register-symbol-p x)
-          do (push i (gethash x exists)))
-     finally
-       (return 
-         (loop for k being the hash-keys in exists
-            collect
-              (list k (apply #'min (gethash k exists)) (apply #'max (gethash k exists)))))))
+(defstruct liveness name start end)
 
 (defun analyze-liveness (ir)
   "analyze liveness for IR. return list of (register start end)."
@@ -175,20 +159,21 @@
            if (register-symbol-p r)
            do (push i (gethash r exists))
            else
-           do (warn "in regs, but not register-symbol-p: ~a" r)
-             )
+           do (warn "in regs, but not register-symbol-p: ~a" r))
      finally
        (return 
          (loop for k being the hash-keys in exists
             collect
-              (list k (apply #'min (gethash k exists)) (apply #'max (gethash k exists)))))))
+              (make-liveness :name k
+                             :start (apply #'min (gethash k exists))
+                             :end (apply #'max (gethash k exists)))))))
 
 (defun interference-p (liveness1 liveness2)
   "return non-nil if liveness1 and liveness2 are inteferenced."
-  (let ((s1 (nth 1 liveness1))
-        (e1 (nth 2 liveness1))
-        (s2 (nth 1 liveness2))
-        (e2 (nth 2 liveness2)))
+  (let ((s1 (liveness-start liveness1))
+        (e1 (liveness-end liveness1))
+        (s2 (liveness-start liveness2))
+        (e2 (liveness-end liveness2)))
     (assert (and (>= e1 s1) (>= e2 s2)))
     (or
      (and (< s2 s1) (> e2 s1))
@@ -201,10 +186,11 @@
   (let ((regs (collect-register ir))
         (liveness (analyze-liveness ir))
         (done nil))
-    (loop for r0 in regs for r0range = (assoc r0 liveness)
+    (loop for r0 in regs
+       for r0range = (find r0 liveness :key #'liveness-name)
        do
          (loop for r1 in regs
-            for r1range = (assoc r1 liveness)
+            for r1range = (find r1 liveness :key #'liveness-name)
             if (and (not (eql r0 r1))
                     (interference-p r0range r1range)
                     (not (member r1 done)))
@@ -219,37 +205,127 @@
 
 (defun calc-allocation-by-linear-scan (ir registers liveness si)
   (declare (ignore ir))
-  (flet ((startpoint (r)
-           (nth 1 (assoc r liveness)))
-         (endpoint (r)
-           (nth 2 (assoc r liveness))))
-    (loop for (r startpoint endpoint) in liveness with active = nil
-       with pool = (mapcar #'(lambda (x)
-                               `(REG ,x)) (copy-seq registers))
-       with allocation = (make-hash-table :test #'equal)
-       unless (member r *x86-64-registers* :test #'equal) ;; 実レジスタは再アロケートしない
-       do
-         (loop named active-loop for ar in (copy-seq active)
-            do
-              (when (>= (endpoint ar) (startpoint r))
-                (return-from active-loop nil))
-              (setf active (remove ar active))
-              (push (gethash ar allocation) pool))
-         (if pool
-             (setf (gethash r allocation) (pop pool))
-             (progn
-               (warn "fail to allocate register!")
-               (setf (gethash r allocation) `((REG "rsp") ,si))
-               (decf si *word-size*))
-             )
-         (push r active)
-         (setf active (sort active #'< :key #'endpoint))
-       finally
-         (return allocation))))
+  (loop for r in liveness
+     with active = nil
+     with pool = (mapcar #'(lambda (x)
+                             `(REG ,x)) (copy-seq registers))
+     with allocation = (make-hash-table :test #'equal)
+     unless (member (liveness-name r) *x86-64-registers* :test #'equal) ;; 実レジスタは再アロケートしない
+     do
+       (loop named active-loop for ar in (copy-seq active)
+          do
+            (when (>= (liveness-end ar) (liveness-start r))
+              (return-from active-loop nil))
+            (setf active (remove ar active))
+            (push (gethash (liveness-name ar) allocation) pool))
+       (if pool
+           (setf (gethash (liveness-name r) allocation) (pop pool))
+           (progn
+             (warn "fail to allocate register!")
+             (setf (gethash (liveness-name r) allocation) `((REG "rsp") ,si))
+             (decf si *word-size*))
+           )
+       (push r active)
+       (setf active (sort active #'< :key #'liveness-end))
+     finally
+       (return allocation)))
 
+;; new ver
+
+;;; now
+;; linear scan register allocation
+
+(defun replace-all-virtual-register (insn register location)
+  (match insn
+    (('REG r)
+     (cond
+       ((gethash r location)
+        `((REG "rsp") ,(gethash r location)))
+       ((gethash r register)
+        `(REG ,(gethash r register)))
+       (t
+        `(REG ,r)))) ;; fixme
+    (t
+     (if (consp insn)
+         (cons (replace-all-virtual-register (car insn) register location)
+               (replace-all-virtual-register (cdr insn) register location))
+         insn))))
+
+(defun allocate-register (ir &optional (init-regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
+                                                        "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
+  (let* ((liveness (sort (analyze-liveness ir) #'< :key #'liveness-start))
+         (si (- *word-size*))  ;; fixme まっとうな手段で si を得ること
+         (r (length init-regs))
+         (register (make-hash-table :test #'equal))
+         (location (make-hash-table :test #'equal)) 
+         (pool (copy-seq init-regs))
+         (active nil)
+         )
+    (labels ((startpoint (i) (liveness-start i))
+             (endpoint (i) (liveness-end i))
+             (expire-old-intervals (i)
+               (warn "expire-old-intervals: active=~a" (mapcar #'liveness-name active))
+               (loop for j in (sort (copy-seq active) #'< :key #'endpoint)
+                  do
+                    (when (>= (endpoint j) (startpoint i))
+                      (warn "endpoint ~a >= startpoint ~a, dont expire." (endpoint i) (startpoint j))
+                      (return-from expire-old-intervals))
+                    (warn "remove ~a from active" (liveness-name j))
+                    (setf active (remove j active :test #'equal))
+                    (push (gethash (liveness-name j) register) pool)
+                    ))
+             (spill-at-interval (i)
+               (warn "spill-at-interval ~a:" (liveness-name i))
+               (let ((spill (car (last active))))
+                 (warn "try to spill=~a..." spill)
+                 (cond
+                   ((> (endpoint spill) (endpoint i))
+                    (warn "endpoint spill ~a > endpoint i ~a." (endpoint spill) (endpoint i))
+                    (setf (gethash (liveness-name i) register) (gethash (liveness-name spill) register))
+                    (setf (gethash (liveness-name spill) location) si)
+                    (decf si *word-size*)
+                    (warn "befere spill: active = ~a" active)
+                    (setf active (remove spill active :test #'equal))
+                    (push i active)
+                    (setf active (sort (copy-seq active) #'< :key #'endpoint))
+                    (warn "after spill: active=~a" active)
+                    )
+                   (t
+                    (warn "spill-at-interval else")
+                    (setf (gethash (liveness-name i) location) si)
+                    (decf si *word-size*))))
+               ))
+      (loop for i in liveness ;; list of liveness
+         unless (member (liveness-name i) *x86-64-registers* :test #'equal)
+         do
+           (warn ";;; process liveness ~a..." (liveness-name i))
+           (expire-old-intervals i)
+           (cond
+             ((= (length active) r)
+              (warn "active = ~a, then spill ~a" (length active) (liveness-name i))
+              (spill-at-interval i))
+             (t
+              (warn "get register from pool ~a" pool)
+              (setf (gethash (liveness-name i) register) (pop pool))
+              (push i active)
+              (setf active (sort active #'< :key #'liveness-end))))
+         finally
+           (warn "register:")
+           (dump-hash register)
+           (warn "location:")
+           (dump-hash location)
+           (return (replace-all-virtual-register ir
+                                                 register 
+                                                 location))
+           ))))
+
+
+
+
+;; old 
 (defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
                                                    "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
-  (let* ((liveness (sort (analyze-liveness ir) #'< :key (lambda (x) (nth 1 x))))
+  (let* ((liveness (sort (analyze-liveness ir) #'< :key #'liveness-start))
          (si (- *word-size*)) ;; fixme まっとうな手段で si を得ること
          (allocation (calc-allocation-by-linear-scan ir regs liveness si)))
     (dump-hash allocation)
@@ -264,22 +340,6 @@
          (cons (replace-all-registers (car insn) allocation)
                (replace-all-registers (cdr insn) allocation))
          insn))))
-
-;; (defun generate-spill-code (insn si)
-;;   (match insn
-;;     (('SET ('REG vr) v)
-;;      `(SET ((REG "rsp") ,si) ,v))
-;;     (('ADD ('REG r0) ('REG r1))
-;;      `(ADD ((REG ,r0) ,si) (REG ,r1)))
-;;     (t
-;;      insn)))
-
-;;          (t ;; emit stack operation
-;;           (warn "INSN: ~a~%" insn)
-;;           (warn "found not assigned: ~a" vregs)
-;;           (let ((new-insn (generate-spil-code insn si)))
-;;             (setf si (- si *word-size*))
-;;             (list new-insn)))
 
 (defun allocate-register-iter (ir regmap)
   (loop for insn in ir
@@ -322,6 +382,7 @@
 
           (('SET ('REG r) v)
            (emit "movq $~a, %~a" v r))
+
           (('SET (('REG r0) disp) ('REG r1)) ;; 間接参照
            (emit "movq %~a, ~a(%~a)" r1 disp r0))
 
@@ -373,7 +434,7 @@
            (emit "~a:" label))
 
           (t
-           (error "emit-asm error unmatch expression: ~a" ir)))
+           (error "emit-asm error unmatch expression: ~a~%~a" (car ir) ir)))
         (emit-asm (cdr ir)))))
 
 (defun genlabel ()
@@ -381,6 +442,10 @@
 
 (defun genreg ()
   (gensym "reg"))
+
+(defmacro with-genregs ((&rest regs) &body body)
+  `(let ,(loop for r in regs collect `(,r ',(genreg)))
+     ,@body))
 
 (defun specific-symbol-p (x thing)
   (and (symbolp x)
@@ -397,6 +462,19 @@
 
 (defun label-symbol-p (x)
   (specific-symbol-p x "Label"))
+
+;; IR Utility
+;; (defun ir-reg (r)
+;;   `(REG ,r))
+
+;; (defun ir-reg-disp (r disp)
+;;   `((REG ,r ,disp)))
+
+;; (defun ir-set (dest value)
+;;   `(SET ,dest ,value))
+
+;; (defun ir-add (source dest)
+;;   `(ADD ,source ,dest))
 
 (defun expr->ir (x si &optional (acc (genreg)))
   "compile expression X into Carve IR."
@@ -509,7 +587,9 @@
     (emit-header)
     (let* ((si (- *word-size*))
            (ir0 (expr->ir x si "rax"))
-           (ir1 (allocate-register ir0)))
+           (ir1 (allocate-register ir0))
+           ;;(ir1 (allocate-register ir0 (list "rbx" "rcx")))
+           )
       (print-info ir0 "IR0")
       (print-info ir1 "IR1")
       (emit-asm ir1)
@@ -667,7 +747,15 @@
     (equal "105"
            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)  nil))
     (equal "120"
-           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15)  nil))
+           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15) nil))
+    
+    (equal "191"
+           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)
+                  (%+ (%+ 20 21) (%+ 22 23))) nil))
+
+    (equal "245"
+           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) (%+ 30 31)) 8) 9) 10) 11) 12) 13) 14)
+                  (%+ (%+ 20 21) (%+ 22 23))) nil))
     ))
     
 
@@ -692,7 +780,7 @@
   (let ((regs (collect-register ir))
         (liveness (analyze-liveness ir)))
     (let ((num-reg (length regs))
-          (num-code (1+ (apply #'max (flatten (mapcar #'cdr liveness))))))
+          (num-code (1+ (apply #'max (mapcar #'liveness-end liveness)))))
       (format out "%!PS-Adobe-3.0 EPSF-3.0
 gsave
 
@@ -791,21 +879,17 @@ gsave
 %
 /num-reg ~a def
 /num-code ~a def
-/ygap 20 def
+/ygap 10 def
 /x0gap 100 def
-/xgap 25 def
-/y0 750 def
+/xgap 15 def
+/y0 755 def
 
 /figwidth xgap num-reg 2 mul mul def
 x0gap y0 ygap figwidth num-code hdashlines~%"
               num-reg num-code)
-      (loop for r in regs for i from 1
+      (loop for i from 1 for l in (sort (copy-seq liveness) #'< :key #'liveness-start)
          do
-           (format out "~a ~a ~a regline~%"
-                   i
-                   (nth 1 (assoc r liveness))
-                   (nth 2 (assoc r liveness))))
-      
+           (format out "~a ~a ~a regline~%" i (liveness-start l) (liveness-end l)))
       (format out
               "showpage
 grestore"))))
