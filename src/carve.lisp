@@ -203,38 +203,6 @@
   (loop for k being the hash-keys in ht
      do (format t "~a => ~a~%" k (gethash k ht))))
 
-(defun calc-allocation-by-linear-scan (ir registers liveness si)
-  (declare (ignore ir))
-  (loop for r in liveness
-     with active = nil
-     with pool = (mapcar #'(lambda (x)
-                             `(REG ,x)) (copy-seq registers))
-     with allocation = (make-hash-table :test #'equal)
-     unless (member (liveness-name r) *x86-64-registers* :test #'equal) ;; 実レジスタは再アロケートしない
-     do
-       (loop named active-loop for ar in (copy-seq active)
-          do
-            (when (>= (liveness-end ar) (liveness-start r))
-              (return-from active-loop nil))
-            (setf active (remove ar active))
-            (push (gethash (liveness-name ar) allocation) pool))
-       (if pool
-           (setf (gethash (liveness-name r) allocation) (pop pool))
-           (progn
-             (warn "fail to allocate register!")
-             (setf (gethash (liveness-name r) allocation) `((REG "rsp") ,si))
-             (decf si *word-size*))
-           )
-       (push r active)
-       (setf active (sort active #'< :key #'liveness-end))
-     finally
-       (return allocation)))
-
-;; new ver
-
-;;; now
-;; linear scan register allocation
-
 (defun replace-all-virtual-register (insn register location)
   (match insn
     (('REG r)
@@ -244,7 +212,7 @@
        ((gethash r register)
         `(REG ,(gethash r register)))
        (t
-        `(REG ,r)))) ;; fixme
+        `(REG ,r))))
     (t
      (if (consp insn)
          (cons (replace-all-virtual-register (car insn) register location)
@@ -259,8 +227,7 @@
          (register (make-hash-table :test #'equal))
          (location (make-hash-table :test #'equal)) 
          (pool (copy-seq init-regs))
-         (active nil)
-         )
+         (active nil))
     (labels ((startpoint (i) (liveness-start i))
              (endpoint (i) (liveness-end i))
              (expire-old-intervals (i)
@@ -268,12 +235,12 @@
                (loop for j in (sort (copy-seq active) #'< :key #'endpoint)
                   do
                     (when (>= (endpoint j) (startpoint i))
-                      (warn "endpoint ~a >= startpoint ~a, dont expire." (endpoint i) (startpoint j))
+                      (warn "endpoint ~a >= startpoint ~a, dont expire."
+                            (endpoint i) (startpoint j))
                       (return-from expire-old-intervals))
                     (warn "remove ~a from active" (liveness-name j))
                     (setf active (remove j active :test #'equal))
-                    (push (gethash (liveness-name j) register) pool)
-                    ))
+                    (push (gethash (liveness-name j) register) pool)))
              (spill-at-interval (i)
                (warn "spill-at-interval ~a:" (liveness-name i))
                (let ((spill (car (last active))))
@@ -281,20 +248,19 @@
                  (cond
                    ((> (endpoint spill) (endpoint i))
                     (warn "endpoint spill ~a > endpoint i ~a." (endpoint spill) (endpoint i))
-                    (setf (gethash (liveness-name i) register) (gethash (liveness-name spill) register))
+                    (setf (gethash (liveness-name i) register)
+                          (gethash (liveness-name spill) register))
                     (setf (gethash (liveness-name spill) location) si)
                     (decf si *word-size*)
                     (warn "befere spill: active = ~a" active)
                     (setf active (remove spill active :test #'equal))
                     (push i active)
                     (setf active (sort (copy-seq active) #'< :key #'endpoint))
-                    (warn "after spill: active=~a" active)
-                    )
+                    (warn "after spill: active=~a" active))
                    (t
                     (warn "spill-at-interval else")
                     (setf (gethash (liveness-name i) location) si)
-                    (decf si *word-size*))))
-               ))
+                    (decf si *word-size*))))))
       (loop for i in liveness ;; list of liveness
          unless (member (liveness-name i) *x86-64-registers* :test #'equal)
          do
@@ -310,52 +276,10 @@
               (push i active)
               (setf active (sort active #'< :key #'liveness-end))))
          finally
-           (warn "register:")
-           (dump-hash register)
-           (warn "location:")
-           (dump-hash location)
            (return (replace-all-virtual-register ir
                                                  register 
-                                                 location))
-           ))))
+                                                 location))))))
 
-
-
-
-;; old 
-;; (defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
-;;                                                    "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
-;;   (let* ((liveness (sort (analyze-liveness ir) #'< :key #'liveness-start))
-;;          (si (- *word-size*)) ;; fixme まっとうな手段で si を得ること
-;;          (allocation (calc-allocation-by-linear-scan ir regs liveness si)))
-;;     (dump-hash allocation)
-;;     (allocate-register-iter ir allocation)))
-
-;; (defun replace-all-registers (insn allocation)
-;;   (match insn
-;;     (('REG r)
-;;      (gethash r allocation `(REG ,r))) ;; fixme
-;;     (t
-;;      (if (consp insn)
-;;          (cons (replace-all-registers (car insn) allocation)
-;;                (replace-all-registers (cdr insn) allocation))
-;;          insn))))
-
-;; (defun allocate-register-iter (ir regmap)
-;;   (loop for insn in ir
-;;      for vregs = (loop for r in (collect-register insn)
-;;                     unless (member r *x86-64-registers* :test #'equal)
-;;                     collect r)
-;;      append
-;;        (cond
-;;          ((null vregs) ;; no register instruction.
-;;           (list insn))
-;;          ((every (lambda (r) (gethash r regmap)) vregs)
-;;           (list (replace-all-registers insn regmap)))
-;;          (t
-;;           (list insn)))))
-
-         
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; x86_64 and Carve IR
 ;; movq source, dest
