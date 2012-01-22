@@ -323,37 +323,37 @@
 
 
 ;; old 
-(defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
-                                                   "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
-  (let* ((liveness (sort (analyze-liveness ir) #'< :key #'liveness-start))
-         (si (- *word-size*)) ;; fixme まっとうな手段で si を得ること
-         (allocation (calc-allocation-by-linear-scan ir regs liveness si)))
-    (dump-hash allocation)
-    (allocate-register-iter ir allocation)))
+;; (defun allocate-register (ir &optional (regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
+;;                                                    "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
+;;   (let* ((liveness (sort (analyze-liveness ir) #'< :key #'liveness-start))
+;;          (si (- *word-size*)) ;; fixme まっとうな手段で si を得ること
+;;          (allocation (calc-allocation-by-linear-scan ir regs liveness si)))
+;;     (dump-hash allocation)
+;;     (allocate-register-iter ir allocation)))
 
-(defun replace-all-registers (insn allocation)
-  (match insn
-    (('REG r)
-     (gethash r allocation `(REG ,r))) ;; fixme
-    (t
-     (if (consp insn)
-         (cons (replace-all-registers (car insn) allocation)
-               (replace-all-registers (cdr insn) allocation))
-         insn))))
+;; (defun replace-all-registers (insn allocation)
+;;   (match insn
+;;     (('REG r)
+;;      (gethash r allocation `(REG ,r))) ;; fixme
+;;     (t
+;;      (if (consp insn)
+;;          (cons (replace-all-registers (car insn) allocation)
+;;                (replace-all-registers (cdr insn) allocation))
+;;          insn))))
 
-(defun allocate-register-iter (ir regmap)
-  (loop for insn in ir
-     for vregs = (loop for r in (collect-register insn)
-                    unless (member r *x86-64-registers* :test #'equal)
-                    collect r)
-     append
-       (cond
-         ((null vregs) ;; no register instruction.
-          (list insn))
-         ((every (lambda (r) (gethash r regmap)) vregs)
-          (list (replace-all-registers insn regmap)))
-         (t
-          (list insn)))))
+;; (defun allocate-register-iter (ir regmap)
+;;   (loop for insn in ir
+;;      for vregs = (loop for r in (collect-register insn)
+;;                     unless (member r *x86-64-registers* :test #'equal)
+;;                     collect r)
+;;      append
+;;        (cond
+;;          ((null vregs) ;; no register instruction.
+;;           (list insn))
+;;          ((every (lambda (r) (gethash r regmap)) vregs)
+;;           (list (replace-all-registers insn regmap)))
+;;          (t
+;;           (list insn)))))
 
          
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
