@@ -70,13 +70,13 @@
   (apply 'format *asm-output* str args)
   (terpri *asm-output*))
 
-(defun primcall-p (expr)
-  "return non-nil if expr is primitive function call."
-  (and (consp expr)
-       (member (car expr)
-               '(%add1 %sub1
-                 %fixnum->char %char->fixnum
-                 %zero? %null? %fixnum? %boolean?))))
+;; (defun primcall-p (expr)
+;;   "return non-nil if expr is primitive function call."
+;;   (and (consp expr)
+;;        (member (car expr)
+;;                '(%add1 %sub1
+;;                  %fixnum->char %char->fixnum
+;;                  %zero? %null? %fixnum? %boolean?))))
 
 (defun primcall-op (expr)
   "return operator of primitive function call."
@@ -125,8 +125,7 @@
   (or (immediate-integer-p x) (null x)
       (characterp x)
       (eql x '|#t|)
-      (eql x '|#f|)
-      ))
+      (eql x '|#f|)))
 
 (defun collect-register (ir)
   "return list of register name in the IR."
@@ -301,7 +300,7 @@
         (match (car ir)
           (('SET ('REG r1) ('REG r0))
            (emit "movq %~a, %~a" r0 r1))
-          (('SET ('REG r1) (('REG r0) disp)) ;; 間接参照 fixme 存在?
+          (('SET ('REG r1) (('REG r0) disp)) ;; 間接参照
            (emit "movq ~a(%~a), %~a" disp r0 r1))
 
           (('SET ('REG r) v)
@@ -310,8 +309,10 @@
           (('SET (('REG r0) disp) ('REG r1)) ;; 間接参照
            (emit "movq %~a, ~a(%~a)" r1 disp r0))
 
-          (('SET (('REG r0) disp0) (('REG r1) disp1)) ;; fixme 存在しない命令
-           (emit "movq ~a(%~a), ~a(%~a)" disp1 r1 disp0 r0))
+          (('SET (('REG r0) disp0) (('REG r1) disp1)) ;; 存在しない命令
+           (error (make-condition 'scheme-compile-error
+                                  :expr (car ir)
+                                  :reason "Invalid compilation.src and dest are memory")))
 
           (('SET (('REG r0) disp) v) ;; 間接参照
            (emit "movq $~a, ~a(%~a)" v disp r0))
@@ -324,9 +325,10 @@
           (('ADD ('REG r1) (('REG r0) disp))
            (emit "addq %~a, ~a(%~a)" r1 disp r0))
 
-          (('ADD (('REG r1) disp1) (('REG r0) disp0))
-           ;; 存在しない命令
-           (emit "addq ~a(%~a), ~a(%~a)" disp1 r1 disp0 r0))
+          (('ADD (('REG r1) disp1) (('REG r0) disp0)) ;; 存在しない命令
+           (error (make-condition 'scheme-compile-error
+                                  :expr (car ir)
+                                  :reason "Invalid compilation.src and dest are memory")))
 
           (('ADD v ('REG r))
            (emit "addq $~a, %~a" v r))
@@ -387,18 +389,28 @@
 (defun label-symbol-p (x)
   (specific-symbol-p x "Label"))
 
-;; IR Utility
-;; (defun ir-reg (r)
-;;   `(REG ,r))
+(defun add1/sub1->ir (op expr si acc)
+  (let ((insn (ecase op
+                ((%add1) 'ADD)
+                ((%sub1) 'SUB))))
+    (cond
+      ((immediate-p expr)
+       `((SET (REG ,acc) ,(immediate-rep expr))
+         (,insn ,(immediate-rep 1) (REG ,acc))))
+      (t
+       `(,@(expr->ir expr si acc)
+           (,insn ,(immediate-rep 1) (REG ,acc)))))))
 
-;; (defun ir-reg-disp (r disp)
-;;   `((REG ,r ,disp)))
-
-;; (defun ir-set (dest value)
-;;   `(SET ,dest ,value))
-
-;; (defun ir-add (source dest)
-;;   `(ADD ,source ,dest))
+(defun add/sub->ir (op expr1 expr2 si acc)
+  (let ((insn (ecase op
+                ((%+) 'ADD)
+                ((%-) 'SUB)))
+        (r1 (genreg))
+        (r2 (genreg)))
+    `(,@(expr->ir expr2 si r2)
+        ,@(expr->ir expr1 si r1)
+        (,insn (REG ,r2) (REG ,r1))
+        (SET (REG ,acc) (REG ,r1)))))
 
 (defun expr->ir (x si &optional (acc (genreg)))
   "compile expression X into Carve IR."
@@ -406,21 +418,9 @@
       `((SET (REG ,acc) ,(immediate-rep x)))
       (match x
         (('%add1 expr)
-         (cond
-           ((immediate-p expr)
-            `((SET (REG ,acc) ,(immediate-rep expr))
-              (ADD ,(immediate-rep 1) (REG ,acc))))
-           (t
-            `(,@(expr->ir expr si acc)
-                (ADD ,(immediate-rep 1) (REG ,acc))))))
+         (add1/sub1->ir '%add1 expr si acc))
         (('%sub1 expr)
-         (cond
-           ((immediate-p expr)
-            `((SET (REG ,acc) ,(immediate-rep expr))
-              (SUB ,(immediate-rep 1) (REG ,acc))))
-           (t
-            `(,@(expr->ir expr si acc)
-                (SUB ,(immediate-rep 1) (REG ,acc))))))
+         (add1/sub1->ir '%sub1 expr si acc))
         (('%fixnum->char expr)
          `(,@(expr->ir expr si acc)
              (SHL ,(- *char-shift* *fixnum-shift*) (REG ,acc))
@@ -470,22 +470,12 @@
                (DEFLABEL ,alt-label)
                ,@(expr->ir altern si acc)
                (DEFLABEL ,end-label))))
-        
+
         (('%+ expr1 expr2)
-         (let ((r1 (genreg))
-               (r2 (genreg)))
-           `(,@(expr->ir expr2 si r2)
-               ,@(expr->ir expr1 si r1)
-               (ADD (REG ,r2) (REG ,r1))
-               (SET (REG ,acc) (REG ,r1)))))
+         (add/sub->ir '%+ expr1 expr2 si acc))
 
         (('%- expr1 expr2)
-         (let ((r1 (genreg))
-               (r2 (genreg)))
-           `(,@(expr->ir expr2 si r2)
-               ,@(expr->ir expr1 si r1)
-               (SUB (REG ,r2) (REG ,r1))
-               (SET (REG ,acc) (REG ,r1)))))
+         (add/sub->ir '%- expr1 expr2 si acc))
 
         (('plus expr1 expr2) ;; 
          `(,@(expr->ir expr2 si acc)
@@ -682,6 +672,13 @@
                   (%+ (%+ 20 21) (%+ 22 23))) nil))
     ))
     
+(deftest test-- ()
+  (check
+    (equal "3" (run '(%- 4 1) nil))
+    (equal "-1" (run '(%- 1 2) nil))
+    (equal "-6" (run '(%- -1 5) nil))
+    (equal "10" (run '(%- 10 0) nil))
+    ))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility
