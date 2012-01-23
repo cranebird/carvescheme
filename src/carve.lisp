@@ -367,10 +367,11 @@
   (gensym "Label"))
 
 (defun genreg ()
+  "create symbol for virtual register."
   (gensym "reg"))
 
-(defmacro with-genregs ((&rest regs) &body body)
-  `(let ,(loop for r in regs collect `(,r ',(genreg)))
+(defmacro with-vregs ((&rest regs) &body body)
+  `(let ,(loop for r in regs collect `(,r (genreg)))
      ,@body))
 
 (defun specific-symbol-p (x thing)
@@ -404,13 +405,12 @@
 (defun add/sub->ir (op expr1 expr2 si acc)
   (let ((insn (ecase op
                 ((%+) 'ADD)
-                ((%-) 'SUB)))
-        (r1 (genreg))
-        (r2 (genreg)))
-    `(,@(expr->ir expr2 si r2)
-        ,@(expr->ir expr1 si r1)
-        (,insn (REG ,r2) (REG ,r1))
-        (SET (REG ,acc) (REG ,r1)))))
+                ((%-) 'SUB))))
+    (with-vregs (r1 r2)
+      `(,@(expr->ir expr2 si r2)
+          ,@(expr->ir expr1 si r1)
+          (,insn (REG ,r2) (REG ,r1))
+          (SET (REG ,acc) (REG ,r1))))))
 
 (defun expr->ir (x si &optional (acc (genreg)))
   "compile expression X into Carve IR."
