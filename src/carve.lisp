@@ -338,19 +338,19 @@
            (error "emit-asm error unmatch expression: ~a~%~a" (car ir) ir)))
         (emit-asm (cdr ir)))))
 
-(defun genlabel ()
+(defun gen-label ()
   (gensym "Label"))
 
-(defun genreg ()
+(defun gen-vreg ()
   "create symbol for virtual register."
   (gensym "reg"))
 
 (defmacro with-vregs ((&rest regs) &body body)
-  `(let ,(loop for r in regs collect `(,r (genreg)))
+  `(let ,(loop for r in regs collect `(,r (gen-vreg)))
      ,@body))
 
 (defmacro with-labels ((&rest labels) &body body)
-  `(let ,(loop for l in labels collect `(,l (genlabel)))
+  `(let ,(loop for l in labels collect `(,l (gen-label)))
      ,@body))
 
 (defun specific-symbol-p (x thing)
@@ -372,33 +372,49 @@
 
 ;; IR
 
+(defun seq (&rest code)
+  "return a sequence of instruction."
+  (apply #'append code))
+
+(defun gen (opcode &rest args)
+  (list (cons opcode args)))
+
+(defun reg (r)
+  `(:REG ,r))
+
 (defun comp-unary (expr si acc &rest cont)
   "generate unary primitive call."
-  `(,@(comp expr si acc)
-      ,@cont))
+  (seq (comp expr si acc) cont))
 
 (defun comp-add1/sub1 (op expr si acc)
   (let ((insn (ecase op
                 ((%add1) :ADD)
                 ((%sub1) :SUB))))
+    ;; (comp-unary expr si acc
+    ;;            `(,insn ,(immediate-rep 1) (:REG ,acc)))
     (comp-unary expr si acc
-               `(,insn ,(immediate-rep 1) (:REG ,acc)))))
+                (gen insn (immediate-rep 1) (reg acc)))
+    ))
 
 (defun comp-add/sub (op expr1 expr2 si acc)
   (let ((insn (ecase op
                 ((%+) :ADD)
                 ((%-) :SUB))))
     (with-vregs (r1 r2)
-      `(,@(comp expr2 si r2)
-          ,@(comp expr1 si r1)
-          (,insn (:REG ,r2) (:REG ,r1))
-          (:SET (:REG ,acc) (:REG ,r1))))))
+      (seq
+       (comp expr2 si r2)
+       (comp expr1 si r1)
+       (gen insn (reg r2) (reg r1))
+       (gen :SET (reg acc) (reg r1)))
+      )))
 
-(defun comp (x si &optional (acc (genreg)))
+
+
+(defun comp (x si &optional (acc (gen-vreg)))
   "compile expression X into Carve IR."
   (cond
     ((immediate-p x)
-     `((:SET (:REG ,acc) ,(immediate-rep x))))
+     (gen :SET `(:REG ,acc) (immediate-rep x)))
     (t
      (match x
        (('%add1 expr)
