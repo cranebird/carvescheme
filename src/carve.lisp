@@ -374,7 +374,7 @@
 
 (defun unary->ir (expr si acc &rest cont)
   "generate unary primitive call."
-  `(,@(expr->ir expr si acc)
+  `(,@(comp expr si acc)
       ,@cont))
 
 (defun add1/sub1->ir (op expr si acc)
@@ -389,12 +389,12 @@
                 ((%+) :ADD)
                 ((%-) :SUB))))
     (with-vregs (r1 r2)
-      `(,@(expr->ir expr2 si r2)
-          ,@(expr->ir expr1 si r1)
+      `(,@(comp expr2 si r2)
+          ,@(comp expr1 si r1)
           (,insn (:REG ,r2) (:REG ,r1))
           (:SET (:REG ,acc) (:REG ,r1))))))
 
-(defun expr->ir (x si &optional (acc (genreg)))
+(defun comp (x si &optional (acc (genreg)))
   "compile expression X into Carve IR."
   (cond
     ((immediate-p x)
@@ -419,7 +419,6 @@
                    `(:SETE (:REG "al"))
                    `(:SAL 4 (:REG ,acc))
                    `(:OR ,*scheme-f* (:REG ,acc))))
-
        (('%null? expr)
         (unary->ir expr si acc
                    `(:CMP ,*empty-list* (:REG ,acc))
@@ -448,13 +447,13 @@
 
        (('if test conseq altern)
         (with-labels (alt-label end-label)
-          `(,@(expr->ir test si acc)
+          `(,@(comp test si acc)
               (:CMP ,*scheme-f* (:REG ,acc))
               (:JE ,alt-label)
-              ,@(expr->ir conseq si acc)
+              ,@(comp conseq si acc)
               (:JMP ,end-label)
               (:DEFLABEL ,alt-label)
-              ,@(expr->ir altern si acc)
+              ,@(comp altern si acc)
               (:DEFLABEL ,end-label))))
 
        (('%+ expr1 expr2)
@@ -464,15 +463,16 @@
         (add/sub->ir '%- expr1 expr2 si acc))
 
        (('plus expr1 expr2) ;; 
-        `(,@(expr->ir expr2 si acc)
+        `(,@(comp expr2 si acc)
             (:SET ((:REG "rsp") ,si) (:REG ,acc)) ;; base register, displ  => -si(%rsp)
-            ,@(expr->ir expr1 (- si *word-size*) acc)
+            ,@(comp expr1 (- si *word-size*) acc)
             (:ADD ((:REG "rsp" ) ,si) (:REG ,acc))))
 
        (t
         (error (make-condition 'scheme-compile-error
                                :expr x :reason "unknown expr")))))))
-        
+
+
 (defun compile-program (x)
   (flet ((emit-header ()
            (emit "	.text")
@@ -485,7 +485,7 @@
            (dump-ir ir *terminal-io*)))
     (emit-header)
     (let* ((si (- *word-size*))
-           (ir0 (expr->ir x si "rax"))
+           (ir0 (comp x si "rax"))
            (ir1 (allocate-register ir0))
            ;;(ir1 (allocate-register ir0 (list "rbx" "rcx")))
            )
@@ -501,13 +501,15 @@
     (compile-program x)))
 
 (defun make-scheme-library ()
-  (sb-ext:run-program "/usr/bin/gcc" `("-g" "-shared" ,*asm-file* "-o" ,*scheme-entry-lib-file*) 
+  (sb-ext:run-program "/usr/bin/gcc"
+                      `("-g" "-shared" ,*asm-file* "-o" ,*scheme-entry-lib-file*) 
                       :error *scheme-entry-error-file* :if-error-exists :supersede
                       :output *scheme-entry-output-file*  :if-output-exists :supersede))
 
 (defun make-scheme-exe ()
   (let ((proc
-         (sb-ext:run-program "/usr/bin/gcc" `("-g" ,*asm-file* ,*scheme-driver-c-file* "-o" ,*scheme-driver-exe*)
+         (sb-ext:run-program "/usr/bin/gcc"
+                             `("-g" ,*asm-file* ,*scheme-driver-c-file* "-o" ,*scheme-driver-exe*)
                              :error *terminal-io*)))
     (unless (= 0 (sb-ext:process-exit-code proc))
       (error "make-scheme-exe exit"))))
