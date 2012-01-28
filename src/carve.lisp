@@ -3,6 +3,9 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (in-package :carve)
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (set-scm-macro-character))
+
 (defvar *asm-output* t
   "write assembler to this stream.")
 
@@ -66,26 +69,6 @@
 (defun emit (str &rest args)
   (apply 'format *asm-output* str args)
   (terpri *asm-output*))
-
-;; (defun primcall-p (expr)
-;;   "return non-nil if expr is primitive function call."
-;;   (and (consp expr)
-;;        (member (car expr)
-;;                '(%add1 %sub1
-;;                  %fixnum->char %char->fixnum
-;;                  %zero? %null? %fixnum? %boolean?))))
-
-(defun primcall-op (expr)
-  "return operator of primitive function call."
-  (car expr))
-
-(defun primcall-operand1 (expr)
-  "return operand-1 of primitive function call."
-  (nth 1 expr))
-
-(defun primcall-operand (expr)
-  "return operands of primitive function call."
-  (cdr expr))
 
 (defun immediate-rep (x)
   (cond
@@ -508,8 +491,7 @@
            (emit "scheme_entry:"))
          (print-info (ir stage)
            (format *terminal-io* ";;; Carve IR ~a~%" stage)
-           (dump-ir ir *terminal-io*))
-         )
+           (dump-ir ir *terminal-io*)))
     (emit-header)
     (let* ((si (- *word-size*))
            (ir0 (expr->ir x si "rax"))
@@ -596,8 +578,8 @@
     (equal "#\\A" (run #\A nil))
     (equal "#\\1" (run #\1 nil))
     (equal "#\\9" (run #\9 nil))
-    (equal "#t" (run '|#t| nil))
-    (equal "#f" (run '|#f| nil))
+    (equal "#t" (run '#t nil))
+    (equal "#f" (run '#f nil))
     ))
 
 (deftest test-unary-primitive ()
@@ -622,8 +604,8 @@
     (equal "#f" (run '(%null? 3) nil))
     (equal "#f" (run '(%null? 0) nil))
 
-    (equal "#t" (run '(%boolean? |#t|) nil))
-    (equal "#t" (run '(%boolean? |#f|) nil))
+    (equal "#t" (run '(%boolean? #t) nil))
+    (equal "#t" (run '(%boolean? #f) nil))
     (equal "#f" (run '(%boolean? 4) nil))
     (equal "#f" (run '(%boolean? -1) nil))
     (equal "#f" (run '(%boolean? nil) nil))
@@ -633,8 +615,8 @@
     (equal "#t" (run '(%fixnum? 4) nil))
     (equal "#t" (run '(%fixnum? -2) nil))
     (equal "#t" (run '(%fixnum? (%add1 -1)) nil))
-    (equal "#f" (run '(%fixnum? |#t|) nil))
-    (equal "#f" (run '(%fixnum? |#f|) nil))
+    (equal "#f" (run '(%fixnum? #t) nil))
+    (equal "#f" (run '(%fixnum? #f) nil))
     (equal "#f" (run '(%fixnum? (%zero? 3)) nil))
     (equal "#f" (run '(%fixnum? (%zero? 0)) nil))
     ))
@@ -648,12 +630,12 @@
 
 (deftest test-if ()
   (check
-    (equal "#t" (run '(if |#t| |#t| |#f|) nil))
-    (equal "#f" (run '(if |#f| |#t| |#f|) nil))
-    (equal "3" (run '(if |#t| 3 4) nil))
-    (equal "4" (run '(if |#f| 3 4) nil))
-    (equal "6" (run '(if |#t| (%add1 5) 4) nil))
-    (equal "9" (run '(if |#f| (%add1 5) (%add1 8)) nil))
+    (equal "#t" (run '(if #t #t #f) nil))
+    (equal "#f" (run '(if #f #t #f) nil))
+    (equal "3" (run '(if #t 3 4) nil))
+    (equal "4" (run '(if #f 3 4) nil))
+    (equal "6" (run '(if #t (%add1 5) 4) nil))
+    (equal "9" (run '(if #f (%add1 5) (%add1 8)) nil))
     ))
 
 (deftest test-+ ()
