@@ -76,9 +76,9 @@
     ((null x) *empty-list*)
     ((characterp x)
      (logior (ash (char-code x) 8) #b00001111))
-    ((eql x '|#t|)
+    ((eql x '#t)
      *scheme-t*)
-    ((eql x '|#f|)
+    ((eql x '#f)
      *scheme-f*)
     ))
 
@@ -106,8 +106,8 @@
   "return non-nil if X is immediate object."
   (or (immediate-integer-p x) (null x)
       (characterp x)
-      (eql x '|#t|)
-      (eql x '|#f|)))
+      (eql x '#t)
+      (eql x '#f)))
 
 (defun collect-register (ir)
   "return list of register name in the IR."
@@ -119,15 +119,6 @@
           (append (collect-register (car ir))
                   (collect-register (cdr ir))))
          nil))))
-
-(defun flatten (x)
-  (cond
-    ((null x)
-     nil)
-    ((atom x)
-     (list x))
-    (t
-     (append (flatten (car x)) (flatten (cdr x))))))
 
 (defstruct liveness name start end)
 
@@ -520,7 +511,6 @@
                              :error *terminal-io*)))
     (unless (= 0 (sb-ext:process-exit-code proc))
       (error "make-scheme-exe exit"))))
-                      
 
 (defun load-scheme-entry ()
   (load-foreign-library *scheme-entry-lib-file*)
