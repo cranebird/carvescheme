@@ -28,9 +28,6 @@
   (list "rbx" "rcx" "rdx" "rdi" "rsi" "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"
         "rax" "rbp" "rsp" "al"))
 
-
-
-
 (defvar *fixnum-tag* #b00)
 (defvar *fixnum-shift* 2)
 (defvar *fixnum-mask* #b11)
@@ -117,11 +114,13 @@
   (- (expt 2 61)))
 
 (defun immediate-integer-p (x)
+  "return non-nil if X is immediate integer."
   (and (integerp x)
        (<= most-negative-immediate-integer x)
        (<= x most-positive-immediate-integer)))
 
 (defun immediate-p (x)
+  "return non-nil if X is immediate object."
   (or (immediate-integer-p x) (null x)
       (characterp x)
       (eql x '|#t|)
@@ -130,7 +129,7 @@
 (defun collect-register (ir)
   "return list of register name in the IR."
   (match ir
-    (('REG r) (list r))
+    ((:REG r) (list r))
     (t
      (if (consp ir)
          (remove-duplicates 
@@ -204,14 +203,14 @@
 
 (defun replace-all-virtual-register (insn register location)
   (match insn
-    (('REG r)
+    ((:REG r)
      (cond
        ((gethash r location)
-        `((REG "rsp") ,(gethash r location)))
+        `((:REG "rsp") ,(gethash r location)))
        ((gethash r register)
-        `(REG ,(gethash r register)))
+        `(:REG ,(gethash r register)))
        (t
-        `(REG ,r))))
+        `(:REG ,r))))
     (t
      (if (consp insn)
          (cons (replace-all-virtual-register (car insn) register location)
@@ -298,65 +297,67 @@
       nil
       (progn
         (match (car ir)
-          (('SET ('REG r1) ('REG r0))
+          ((:SET (:REG r1) (:REG r0))
            (emit "movq %~a, %~a" r0 r1))
-          (('SET ('REG r1) (('REG r0) disp)) ;; 間接参照
+          ((:SET (:REG r1) ((:REG r0) disp)) ;; 間接参照
            (emit "movq ~a(%~a), %~a" disp r0 r1))
 
-          (('SET ('REG r) v)
+          ((:SET (:REG r) v)
            (emit "movq $~a, %~a" v r))
 
-          (('SET (('REG r0) disp) ('REG r1)) ;; 間接参照
+          ((:SET ((:REG r0) disp) (:REG r1)) ;; 間接参照
            (emit "movq %~a, ~a(%~a)" r1 disp r0))
 
-          (('SET (('REG r0) disp0) (('REG r1) disp1)) ;; 存在しない命令
+          ((:SET ((:REG r0) disp0) ((:REG r1) disp1)) ;; 存在しない命令
+           (declare (ignore r0 disp0 r1 disp1))
            (error (make-condition 'scheme-compile-error
                                   :expr (car ir)
                                   :reason "Invalid compilation.src and dest are memory")))
 
-          (('SET (('REG r0) disp) v) ;; 間接参照
+          ((:SET ((:REG r0) disp) v) ;; 間接参照
            (emit "movq $~a, ~a(%~a)" v disp r0))
 
-          (('ADD ('REG r1) ('REG r0))
+          ((:ADD (:REG r1) (:REG r0))
            (emit "addq %~a, %~a" r1 r0))
-          (('ADD (('REG r1) disp) ('REG r0))
+          ((:ADD ((:REG r1) disp) (:REG r0))
            (emit "addq ~a(%~a), %~a" disp r1 r0))
 
-          (('ADD ('REG r1) (('REG r0) disp))
+          ((:ADD (:REG r1) ((:REG r0) disp))
            (emit "addq %~a, ~a(%~a)" r1 disp r0))
 
-          (('ADD (('REG r1) disp1) (('REG r0) disp0)) ;; 存在しない命令
+          ((:ADD ((:REG r1) disp1) ((:REG r0) disp0)) ;; 存在しない命令
+           (declare (ignore r1 disp1 r0 disp0))
            (error (make-condition 'scheme-compile-error
                                   :expr (car ir)
                                   :reason "Invalid compilation.src and dest are memory")))
 
-          (('ADD v ('REG r))
+          ((:ADD v (:REG r))
            (emit "addq $~a, %~a" v r))
 
-          (('SUB ('REG r1) ('REG r0))
+          ((:SUB (:REG r1) (:REG r0))
            (emit "subq %~a, %~a" r1 r0))
-          (('SUB v ('REG r))
+          ((:SUB v (:REG r))
            (emit "subq $~a, %~a" v r))
 
-          (('SHL v ('REG r))
+          ((:SHL v (:REG r))
            (emit "shlq $~a, %~a" v r))
-          (('SHR v ('REG r))
+          ((:SHR v (:REG r))
            (emit "shrq $~a, %~a" v r))
-          (('OR v ('REG r))
+          ((:OR v (:REG r))
            (emit "orq $~a, %~a" v r))
-          (('AND v ('REG r))
+          ((:AND v (:REG r))
            (emit "andq $~a, %~a" v r))
-          (('CMP v ('REG r))
+          ((:CMP v (:REG r))
            (emit "cmpq $~a, %~a" v r))
-          (('SETE ('REG r))
+          ((:SETE (:REG r))
            (emit "sete %~a" r))
-          (('SAL v ('REG r))
+          ((:SAL v (:REG r))
            (emit "salq $~a, %~a" v r))
-          (('JE label)
+          ((:JE label)
            (emit "je ~a" label))
-          (('JMP label)
+          ((:JMP label)
            (emit "jmp ~a" label))
-          (('DEFLABEL label)
+          ((:DEFLABEL label)
            (emit "~a:" label))
 
           (t
@@ -372,6 +373,10 @@
 
 (defmacro with-vregs ((&rest regs) &body body)
   `(let ,(loop for r in regs collect `(,r (genreg)))
+     ,@body))
+
+(defmacro with-labels ((&rest labels) &body body)
+  `(let ,(loop for l in labels collect `(,l (genlabel)))
      ,@body))
 
 (defun specific-symbol-p (x thing)
@@ -390,102 +395,109 @@
 (defun label-symbol-p (x)
   (specific-symbol-p x "Label"))
 
+
+;; IR
+
+(defun unary->ir (expr si acc &rest cont)
+  "generate unary primitive call."
+  `(,@(expr->ir expr si acc)
+      ,@cont))
+
 (defun add1/sub1->ir (op expr si acc)
   (let ((insn (ecase op
-                ((%add1) 'ADD)
-                ((%sub1) 'SUB))))
-    (cond
-      ((immediate-p expr)
-       `((SET (REG ,acc) ,(immediate-rep expr))
-         (,insn ,(immediate-rep 1) (REG ,acc))))
-      (t
-       `(,@(expr->ir expr si acc)
-           (,insn ,(immediate-rep 1) (REG ,acc)))))))
+                ((%add1) :ADD)
+                ((%sub1) :SUB))))
+    (unary->ir expr si acc
+               `(,insn ,(immediate-rep 1) (:REG ,acc)))))
 
 (defun add/sub->ir (op expr1 expr2 si acc)
   (let ((insn (ecase op
-                ((%+) 'ADD)
-                ((%-) 'SUB))))
+                ((%+) :ADD)
+                ((%-) :SUB))))
     (with-vregs (r1 r2)
       `(,@(expr->ir expr2 si r2)
           ,@(expr->ir expr1 si r1)
-          (,insn (REG ,r2) (REG ,r1))
-          (SET (REG ,acc) (REG ,r1))))))
+          (,insn (:REG ,r2) (:REG ,r1))
+          (:SET (:REG ,acc) (:REG ,r1))))))
 
 (defun expr->ir (x si &optional (acc (genreg)))
   "compile expression X into Carve IR."
-  (if (immediate-p x)
-      `((SET (REG ,acc) ,(immediate-rep x)))
-      (match x
-        (('%add1 expr)
-         (add1/sub1->ir '%add1 expr si acc))
-        (('%sub1 expr)
-         (add1/sub1->ir '%sub1 expr si acc))
-        (('%fixnum->char expr)
-         `(,@(expr->ir expr si acc)
-             (SHL ,(- *char-shift* *fixnum-shift*) (REG ,acc))
-             (OR ,*char-tag* (REG ,acc))))
-        (('%char->fixnum expr)
-         `(,@(expr->ir expr si acc)
-             (SHR ,(- *char-shift* *fixnum-shift*) (REG ,acc))))
-        (('%zero? expr)
-         `(,@(expr->ir expr si acc)
-             (CMP 0 (REG ,acc))
-             (SET (REG ,acc) 0)
-             (SETE (REG "al"))
-             (SAL 4 (REG ,acc))
-             (OR ,*scheme-f* (REG ,acc))))
-        (('%null? expr)
-         `(,@(expr->ir expr si acc)
-             (CMP ,*empty-list* (REG ,acc))
-             (SET (REG ,acc) 0)
-             (SETE (REG "al"))
-             (SAL 4 (REG ,acc))
-             (OR ,*scheme-f* (REG ,acc))))
-        (('%boolean? expr)
-         `(,@(expr->ir expr si acc)
-             (AND ,*scheme-f* (REG ,acc))
-             (CMP ,*scheme-f* (REG ,acc))
-             (SET (REG ,acc) 0)
-             (SETE (REG "al"))
-             (SAL 4 (REG ,acc))
-             (OR ,*scheme-f* (REG ,acc))))
-        (('%fixnum? expr)
-         `(,@(expr->ir expr si acc)
-             (AND ,3 (REG ,acc))
-             (CMP ,0 (REG ,acc))
-             (SET (REG ,acc) 0)
-             (SETE (REG "al"))
-             (SAL 4 (REG ,acc))
-             (OR ,*scheme-f* (REG ,acc))))
+  (cond
+    ((immediate-p x)
+     `((:SET (:REG ,acc) ,(immediate-rep x))))
+    (t
+     (match x
+       (('%add1 expr)
+        (add1/sub1->ir '%add1 expr si acc))
+       (('%sub1 expr)
+        (add1/sub1->ir '%sub1 expr si acc))
+       (('%fixnum->char expr)
+        (unary->ir expr si acc
+                   `(:SHL ,(- *char-shift* *fixnum-shift*) (:REG ,acc))
+                   `(:OR ,*char-tag* (:REG ,acc))))
+       (('%char->fixnum expr)
+        (unary->ir expr si acc
+                   `(:SHR ,(- *char-shift* *fixnum-shift*) (:REG ,acc))))
+       (('%zero? expr)
+        (unary->ir expr si acc
+                   `(:CMP 0 (:REG ,acc))
+                   `(:SET (:REG ,acc) 0)
+                   `(:SETE (:REG "al"))
+                   `(:SAL 4 (:REG ,acc))
+                   `(:OR ,*scheme-f* (:REG ,acc))))
 
-        (('if test conseq altern)
-         (let ((alt-label (genlabel))
-               (end-label (genlabel)))
-           `(,@(expr->ir test si acc)
-               (CMP ,*scheme-f* (REG ,acc))
-               (JE ,alt-label)
-               ,@(expr->ir conseq si acc)
-               (JMP ,end-label)
-               (DEFLABEL ,alt-label)
-               ,@(expr->ir altern si acc)
-               (DEFLABEL ,end-label))))
+       (('%null? expr)
+        (unary->ir expr si acc
+                   `(:CMP ,*empty-list* (:REG ,acc))
+                   `(:SET (:REG ,acc) 0)
+                   `(:SETE (:REG "al")) ;; fixme
+                   `(:SAL 4 (:REG ,acc))
+                   `(:OR ,*scheme-f* (:REG ,acc))))
 
-        (('%+ expr1 expr2)
-         (add/sub->ir '%+ expr1 expr2 si acc))
+       (('%boolean? expr)
+        (unary->ir expr si acc
+                   `(:AND ,*scheme-f* (:REG ,acc))
+                   `(:CMP ,*scheme-f* (:REG ,acc))
+                   `(:SET (:REG ,acc) 0)
+                   `(:SETE (:REG "al"))
+                   `(:SAL 4 (:REG ,acc))
+                   `(:OR ,*scheme-f* (:REG ,acc))))
 
-        (('%- expr1 expr2)
-         (add/sub->ir '%- expr1 expr2 si acc))
+       (('%fixnum? expr)
+        (unary->ir expr si acc
+                   `(:AND ,3 (:REG ,acc))
+                   `(:CMP ,0 (:REG ,acc))
+                   `(:SET (:REG ,acc) 0)
+                   `(:SETE (:REG "al"))
+                   `(:SAL 4 (:REG ,acc))
+                   `(:OR ,*scheme-f* (:REG ,acc))))
 
-        (('plus expr1 expr2) ;; 
-         `(,@(expr->ir expr2 si acc)
-             (SET ((REG "rsp") ,si) (REG ,acc)) ;; base register, displ  => -si(%rsp)
-             ,@(expr->ir expr1 (- si *word-size*) acc)
-             (ADD ((REG "rsp" ) ,si) (REG ,acc))))
+       (('if test conseq altern)
+        (with-labels (alt-label end-label)
+          `(,@(expr->ir test si acc)
+              (:CMP ,*scheme-f* (:REG ,acc))
+              (:JE ,alt-label)
+              ,@(expr->ir conseq si acc)
+              (:JMP ,end-label)
+              (:DEFLABEL ,alt-label)
+              ,@(expr->ir altern si acc)
+              (:DEFLABEL ,end-label))))
 
-        (t
-         (error (make-condition 'scheme-compile-error
-                                :expr x :reason "unknown expr"))))))
+       (('%+ expr1 expr2)
+        (add/sub->ir '%+ expr1 expr2 si acc))
+
+       (('%- expr1 expr2)
+        (add/sub->ir '%- expr1 expr2 si acc))
+
+       (('plus expr1 expr2) ;; 
+        `(,@(expr->ir expr2 si acc)
+            (:SET ((:REG "rsp") ,si) (:REG ,acc)) ;; base register, displ  => -si(%rsp)
+            ,@(expr->ir expr1 (- si *word-size*) acc)
+            (:ADD ((:REG "rsp" ) ,si) (:REG ,acc))))
+
+       (t
+        (error (make-condition 'scheme-compile-error
+                               :expr x :reason "unknown expr")))))))
         
 (defun compile-program (x)
   (flet ((emit-header ()
