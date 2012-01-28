@@ -276,32 +276,46 @@
 (defun asm-const (v)
   (format nil "$~a" v))
 
+;; now
+(defun emit-addressing (x)
+  (match dest
+    ((:REG r)
+     (asm-reg r))
+    (((:REG r) disp)
+     (asm-reg r :disp disp))
+    (t
+     (error "invalid dest"))))
+
+(defun emit-set (dest src)
+  (let ((asm-dest (match dest
+                    ((:REG r)
+                     (asm-reg r))
+                    (((:REG r) disp)
+                     (asm-reg r :disp disp))
+                    (t
+                     (error "invalid dest"))))
+        (asm-src (match src
+                   ((:REG r)
+                    (asm-reg r))
+                   (((:REG r) disp)
+                    (asm-reg r :disp disp))
+                   (t
+                    (asm-const src)))))
+    (emit-mov asm-src asm-dest)))
+
 (defun emit-asm (ir)
   (assert (or (null ir) (consp ir)) (ir) "emit-ir: except cons, but got: ~a" ir)
   (if (null ir)
       nil
       (progn
         (match (car ir)
-          ((:SET (:REG r1) (:REG r0))
-           (emit-mov (asm-reg r0) (asm-reg r1)))
-           
-          ((:SET (:REG r1) ((:REG r0) disp)) ;; 間接参照
-           (emit-mov (asm-reg r0 :disp disp) r1))
-
-          ((:SET (:REG r) v)
-           (emit-mov (asm-const v) (asm-reg r)))
-
-          ((:SET ((:REG r0) disp) (:REG r1)) ;; 間接参照
-           (emit-mov (asm-reg r1) (asm-reg r0 :disp disp)))
-
           ((:SET ((:REG r0) disp0) ((:REG r1) disp1)) ;; 存在しない命令
            (declare (ignore r0 disp0 r1 disp1))
            (error (make-condition 'scheme-compile-error
                                   :expr (car ir)
                                   :reason "Invalid compilation.src and dest are memory")))
-
-          ((:SET ((:REG r0) disp) v) ;; 間接参照
-           (emit-mov (asm-const v) (asm-reg r0 :disp disp)))
+          ((:SET dest src)
+           (emit-set dest src))
 
           ((:ADD (:REG r1) (:REG r0))
            (emit "addq %~a, %~a" r1 r0))
