@@ -372,19 +372,19 @@
 
 ;; IR
 
-(defun unary->ir (expr si acc &rest cont)
+(defun comp-unary (expr si acc &rest cont)
   "generate unary primitive call."
   `(,@(comp expr si acc)
       ,@cont))
 
-(defun add1/sub1->ir (op expr si acc)
+(defun comp-add1/sub1 (op expr si acc)
   (let ((insn (ecase op
                 ((%add1) :ADD)
                 ((%sub1) :SUB))))
-    (unary->ir expr si acc
+    (comp-unary expr si acc
                `(,insn ,(immediate-rep 1) (:REG ,acc)))))
 
-(defun add/sub->ir (op expr1 expr2 si acc)
+(defun comp-add/sub (op expr1 expr2 si acc)
   (let ((insn (ecase op
                 ((%+) :ADD)
                 ((%-) :SUB))))
@@ -402,25 +402,25 @@
     (t
      (match x
        (('%add1 expr)
-        (add1/sub1->ir '%add1 expr si acc))
+        (comp-add1/sub1 '%add1 expr si acc))
        (('%sub1 expr)
-        (add1/sub1->ir '%sub1 expr si acc))
+        (comp-add1/sub1 '%sub1 expr si acc))
        (('%fixnum->char expr)
-        (unary->ir expr si acc
+        (comp-unary expr si acc
                    `(:SHL ,(- *char-shift* *fixnum-shift*) (:REG ,acc))
                    `(:OR ,*char-tag* (:REG ,acc))))
        (('%char->fixnum expr)
-        (unary->ir expr si acc
+        (comp-unary expr si acc
                    `(:SHR ,(- *char-shift* *fixnum-shift*) (:REG ,acc))))
        (('%zero? expr)
-        (unary->ir expr si acc
+        (comp-unary expr si acc
                    `(:CMP 0 (:REG ,acc))
                    `(:SET (:REG ,acc) 0)
                    `(:SETE (:REG "al"))
                    `(:SAL 4 (:REG ,acc))
                    `(:OR ,*scheme-f* (:REG ,acc))))
        (('%null? expr)
-        (unary->ir expr si acc
+        (comp-unary expr si acc
                    `(:CMP ,*empty-list* (:REG ,acc))
                    `(:SET (:REG ,acc) 0)
                    `(:SETE (:REG "al")) ;; fixme
@@ -428,7 +428,7 @@
                    `(:OR ,*scheme-f* (:REG ,acc))))
 
        (('%boolean? expr)
-        (unary->ir expr si acc
+        (comp-unary expr si acc
                    `(:AND ,*scheme-f* (:REG ,acc))
                    `(:CMP ,*scheme-f* (:REG ,acc))
                    `(:SET (:REG ,acc) 0)
@@ -437,7 +437,7 @@
                    `(:OR ,*scheme-f* (:REG ,acc))))
 
        (('%fixnum? expr)
-        (unary->ir expr si acc
+        (comp-unary expr si acc
                    `(:AND ,3 (:REG ,acc))
                    `(:CMP ,0 (:REG ,acc))
                    `(:SET (:REG ,acc) 0)
@@ -457,10 +457,10 @@
               (:DEFLABEL ,end-label))))
 
        (('%+ expr1 expr2)
-        (add/sub->ir '%+ expr1 expr2 si acc))
+        (comp-add/sub '%+ expr1 expr2 si acc))
 
        (('%- expr1 expr2)
-        (add/sub->ir '%- expr1 expr2 si acc))
+        (comp-add/sub '%- expr1 expr2 si acc))
 
        (('plus expr1 expr2) ;; 
         `(,@(comp expr2 si acc)
