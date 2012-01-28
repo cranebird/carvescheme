@@ -180,11 +180,11 @@
     ((:REG r)
      (cond
        ((gethash r location)
-        `((:REG "rsp") ,(gethash r location)))
+        (reg "rsp" :disp (gethash r location)))
        ((gethash r register)
-        `(:REG ,(gethash r register)))
+        (reg (gethash r register)))
        (t
-        `(:REG ,r))))
+        (reg r))))
     (t
      (if (consp insn)
          (cons (replace-all-virtual-register (car insn) register location)
@@ -265,6 +265,17 @@
 ;; jump
 ;; je
 
+(defun emit-mov (src dest &key (size "q"))
+  (emit "mov~a ~a, ~a" size src dest))
+
+(defun asm-reg (r &key disp)
+  (if disp
+      (format nil "~a(%~a)" disp r)
+      (format nil "%~a" r)))
+
+(defun asm-const (v)
+  (format nil "$~a" v))
+
 (defun emit-asm (ir)
   (assert (or (null ir) (consp ir)) (ir) "emit-ir: except cons, but got: ~a" ir)
   (if (null ir)
@@ -272,15 +283,16 @@
       (progn
         (match (car ir)
           ((:SET (:REG r1) (:REG r0))
-           (emit "movq %~a, %~a" r0 r1))
+           (emit-mov (asm-reg r0) (asm-reg r1)))
+           
           ((:SET (:REG r1) ((:REG r0) disp)) ;; 間接参照
-           (emit "movq ~a(%~a), %~a" disp r0 r1))
+           (emit-mov (asm-reg r0 :disp disp) r1))
 
           ((:SET (:REG r) v)
-           (emit "movq $~a, %~a" v r))
+           (emit-mov (asm-const v) (asm-reg r)))
 
           ((:SET ((:REG r0) disp) (:REG r1)) ;; 間接参照
-           (emit "movq %~a, ~a(%~a)" r1 disp r0))
+           (emit-mov (asm-reg r1) (asm-reg r0 :disp disp)))
 
           ((:SET ((:REG r0) disp0) ((:REG r1) disp1)) ;; 存在しない命令
            (declare (ignore r0 disp0 r1 disp1))
@@ -289,7 +301,7 @@
                                   :reason "Invalid compilation.src and dest are memory")))
 
           ((:SET ((:REG r0) disp) v) ;; 間接参照
-           (emit "movq $~a, ~a(%~a)" v disp r0))
+           (emit-mov (asm-const v) (asm-reg r0 :disp disp)))
 
           ((:ADD (:REG r1) (:REG r0))
            (emit "addq %~a, %~a" r1 r0))
@@ -379,24 +391,30 @@
 (defun gen (opcode &rest args)
   (list (cons opcode args)))
 
-(defun reg (r)
-  `(:REG ,r))
+(defun gen-1 ()
+  (immediate-rep 1))
 
-;; (defun comp-unary (expr si acc &rest cont)
-;;   "generate unary primitive call."
-;;   (seq (comp expr si acc) cont))
+(defun gen-set (place value)
+  (gen :SET place value))
+
+(defun gen-deflabel (label)
+  (gen :DEFLABEL label))
+
+(defun gen-and (a b)
+  (gen :AND a b))
+
+(defun gen-or (a b)
+  (gen :OR a b))
+
+(defun reg (r &key disp)
+  "return part of instruction refer the register R."
+  (if disp
+      `((:REG "rsp") ,disp)
+      `(:REG ,r)))
 
 (defun comp-unary (expr si acc code)
   "generate unary primitive call."
   (seq (comp expr si acc) code))
-
-(defun comp-add1/sub1 (op expr si acc)
-  (let ((insn (ecase op
-                ((%add1) :ADD)
-                ((%sub1) :SUB))))
-     (comp-unary expr si acc
-                 (seq (gen insn (immediate-rep 1) (reg acc))))))
-
 
 (defun comp-add/sub (op expr1 expr2 si acc)
   (let ((insn (ecase op
@@ -407,64 +425,61 @@
        (comp expr2 si r2)
        (comp expr1 si r1)
        (gen insn (reg r2) (reg r1))
-       (gen :SET (reg acc) (reg r1)))
-      )))
+       (gen-set (reg acc) (reg r1))))))
 
 (defun comp (x si &optional (acc (gen-vreg)))
   "compile expression X into Carve IR."
   (cond
     ((immediate-p x)
-     (gen :SET `(:REG ,acc) (immediate-rep x)))
+     (gen-set (reg acc) (immediate-rep x)))
     (t
      (match x
        (('%add1 expr)
-        (comp-add1/sub1 '%add1 expr si acc))
+        (comp-unary expr si acc (gen :ADD (gen-1) (reg acc))))
        (('%sub1 expr)
-        (comp-add1/sub1 '%sub1 expr si acc))
+        (comp-unary expr si acc (gen :SUB (gen-1) (reg acc))))
        (('%fixnum->char expr)
         (comp-unary expr si acc
                     (seq
                      (gen :SHL (- *char-shift* *fixnum-shift*) (reg acc))
-                     (gen :OR *char-tag* (reg acc)))))
+                     (gen-or *char-tag* (reg acc)))))
        (('%char->fixnum expr)
         (comp-unary expr si acc
-                    (seq 
-                     (gen :SHR (- *char-shift* *fixnum-shift*) (reg acc)))))
+                    (gen :SHR (- *char-shift* *fixnum-shift*) (reg acc))))
        (('%zero? expr)
         (comp-unary expr si acc
                     (seq
                      (gen :CMP 0 (reg acc))
-                     (gen :SET (reg acc) 0)
+                     (gen-set (reg acc) 0)
                      (gen :SETE (reg "al"))
                      (gen :SAL 4 (reg acc))
-                     (gen :OR *scheme-f* (reg acc)))))
+                     (gen-or *scheme-f* (reg acc)))))
        (('%null? expr)
         (comp-unary expr si acc
                     (seq
                      (gen :CMP *empty-list* (reg acc))
-                     (gen :SET (reg acc) 0)
+                     (gen-set (reg acc) 0)
                      (gen :SETE (reg "al")) ;; fixme
                      (gen :SAL 4 (reg acc))
-                     (gen :OR *scheme-f* (reg acc)))))
+                     (gen-or *scheme-f* (reg acc)))))
        (('%boolean? expr)
         (comp-unary expr si acc
                     (seq 
-                     (gen :AND *scheme-f* (reg acc))
+                     (gen-and *scheme-f* (reg acc))
                      (gen :CMP *scheme-f* (reg acc))
-                     (gen :SET (reg acc) 0)
+                     (gen-set (reg acc) 0)
                      (gen :SETE (reg "al"))
                      (gen :SAL 4 (reg acc))
-                     (gen :OR *scheme-f* (reg acc)))))
+                     (gen-or *scheme-f* (reg acc)))))
        (('%fixnum? expr)
         (comp-unary expr si acc
                     (seq
-                     (gen :AND 3 (reg acc))
+                     (gen-and 3 (reg acc))
                      (gen :CMP 0 (reg acc))
-                     (gen :SET (reg acc) 0)
+                     (gen-set (reg acc) 0)
                      (gen :SETE (reg "al"))
                      (gen :SAL 4 (reg acc))
-                     (gen :OR *scheme-f* (reg acc)))))
-
+                     (gen-or *scheme-f* (reg acc)))))
        (('if test conseq altern)
         (with-labels (alt-label end-label)
           (seq
@@ -473,23 +488,23 @@
            (gen :JE alt-label)
            (comp conseq si acc)
            (gen :JMP end-label)
-           (gen :DEFLABEL alt-label)
+           (gen-deflabel alt-label)
            (comp altern si acc)
-           (gen :DEFLABEL end-label))))
+           (gen-deflabel end-label))))
        (('%+ expr1 expr2)
         (comp-add/sub '%+ expr1 expr2 si acc))
        (('%- expr1 expr2)
         (comp-add/sub '%- expr1 expr2 si acc))
        (('plus expr1 expr2) ;; 
         `(,@(comp expr2 si acc)
-            (:SET ((:REG "rsp") ,si) (reg acc)) ;; base register, displ  => -si(%rsp)
+            ;; base register, displ  => -si(%rsp)
+            (gen-set (reg "rsp" :disp si) (reg acc))
             ,@(comp expr1 (- si *word-size*) acc)
             (:ADD ((:REG "rsp" ) ,si) (reg acc))))
 
        (t
         (error (make-condition 'scheme-compile-error
                                :expr x :reason "unknown expr")))))))
-
 
 (defun compile-program (x)
   (flet ((emit-header ()
