@@ -382,19 +382,21 @@
 (defun reg (r)
   `(:REG ,r))
 
-(defun comp-unary (expr si acc &rest cont)
+;; (defun comp-unary (expr si acc &rest cont)
+;;   "generate unary primitive call."
+;;   (seq (comp expr si acc) cont))
+
+(defun comp-unary (expr si acc code)
   "generate unary primitive call."
-  (seq (comp expr si acc) cont))
+  (seq (comp expr si acc) code))
 
 (defun comp-add1/sub1 (op expr si acc)
   (let ((insn (ecase op
                 ((%add1) :ADD)
                 ((%sub1) :SUB))))
-    ;; (comp-unary expr si acc
-    ;;            `(,insn ,(immediate-rep 1) (:REG ,acc)))
-    (comp-unary expr si acc
-                (gen insn (immediate-rep 1) (reg acc)))
-    ))
+     (comp-unary expr si acc
+                 (seq (gen insn (immediate-rep 1) (reg acc))))))
+
 
 (defun comp-add/sub (op expr1 expr2 si acc)
   (let ((insn (ecase op
@@ -407,8 +409,6 @@
        (gen insn (reg r2) (reg r1))
        (gen :SET (reg acc) (reg r1)))
       )))
-
-
 
 (defun comp (x si &optional (acc (gen-vreg)))
   "compile expression X into Carve IR."
@@ -423,66 +423,68 @@
         (comp-add1/sub1 '%sub1 expr si acc))
        (('%fixnum->char expr)
         (comp-unary expr si acc
-                   `(:SHL ,(- *char-shift* *fixnum-shift*) (:REG ,acc))
-                   `(:OR ,*char-tag* (:REG ,acc))))
+                    (seq
+                     (gen :SHL (- *char-shift* *fixnum-shift*) (reg acc))
+                     (gen :OR *char-tag* (reg acc)))))
        (('%char->fixnum expr)
         (comp-unary expr si acc
-                   `(:SHR ,(- *char-shift* *fixnum-shift*) (:REG ,acc))))
+                    (seq 
+                     (gen :SHR (- *char-shift* *fixnum-shift*) (reg acc)))))
        (('%zero? expr)
         (comp-unary expr si acc
-                   `(:CMP 0 (:REG ,acc))
-                   `(:SET (:REG ,acc) 0)
-                   `(:SETE (:REG "al"))
-                   `(:SAL 4 (:REG ,acc))
-                   `(:OR ,*scheme-f* (:REG ,acc))))
+                    (seq
+                     (gen :CMP 0 (reg acc))
+                     (gen :SET (reg acc) 0)
+                     (gen :SETE (reg "al"))
+                     (gen :SAL 4 (reg acc))
+                     (gen :OR *scheme-f* (reg acc)))))
        (('%null? expr)
         (comp-unary expr si acc
-                   `(:CMP ,*empty-list* (:REG ,acc))
-                   `(:SET (:REG ,acc) 0)
-                   `(:SETE (:REG "al")) ;; fixme
-                   `(:SAL 4 (:REG ,acc))
-                   `(:OR ,*scheme-f* (:REG ,acc))))
-
+                    (seq
+                     (gen :CMP *empty-list* (reg acc))
+                     (gen :SET (reg acc) 0)
+                     (gen :SETE (reg "al")) ;; fixme
+                     (gen :SAL 4 (reg acc))
+                     (gen :OR *scheme-f* (reg acc)))))
        (('%boolean? expr)
         (comp-unary expr si acc
-                   `(:AND ,*scheme-f* (:REG ,acc))
-                   `(:CMP ,*scheme-f* (:REG ,acc))
-                   `(:SET (:REG ,acc) 0)
-                   `(:SETE (:REG "al"))
-                   `(:SAL 4 (:REG ,acc))
-                   `(:OR ,*scheme-f* (:REG ,acc))))
-
+                    (seq 
+                     (gen :AND *scheme-f* (reg acc))
+                     (gen :CMP *scheme-f* (reg acc))
+                     (gen :SET (reg acc) 0)
+                     (gen :SETE (reg "al"))
+                     (gen :SAL 4 (reg acc))
+                     (gen :OR *scheme-f* (reg acc)))))
        (('%fixnum? expr)
         (comp-unary expr si acc
-                   `(:AND ,3 (:REG ,acc))
-                   `(:CMP ,0 (:REG ,acc))
-                   `(:SET (:REG ,acc) 0)
-                   `(:SETE (:REG "al"))
-                   `(:SAL 4 (:REG ,acc))
-                   `(:OR ,*scheme-f* (:REG ,acc))))
+                    (seq
+                     (gen :AND 3 (reg acc))
+                     (gen :CMP 0 (reg acc))
+                     (gen :SET (reg acc) 0)
+                     (gen :SETE (reg "al"))
+                     (gen :SAL 4 (reg acc))
+                     (gen :OR *scheme-f* (reg acc)))))
 
        (('if test conseq altern)
         (with-labels (alt-label end-label)
-          `(,@(comp test si acc)
-              (:CMP ,*scheme-f* (:REG ,acc))
-              (:JE ,alt-label)
-              ,@(comp conseq si acc)
-              (:JMP ,end-label)
-              (:DEFLABEL ,alt-label)
-              ,@(comp altern si acc)
-              (:DEFLABEL ,end-label))))
-
+          (seq
+           (comp test si acc)
+           (gen :CMP *scheme-f* (reg acc))
+           (gen :JE alt-label)
+           (comp conseq si acc)
+           (gen :JMP end-label)
+           (gen :DEFLABEL alt-label)
+           (comp altern si acc)
+           (gen :DEFLABEL end-label))))
        (('%+ expr1 expr2)
         (comp-add/sub '%+ expr1 expr2 si acc))
-
        (('%- expr1 expr2)
         (comp-add/sub '%- expr1 expr2 si acc))
-
        (('plus expr1 expr2) ;; 
         `(,@(comp expr2 si acc)
-            (:SET ((:REG "rsp") ,si) (:REG ,acc)) ;; base register, displ  => -si(%rsp)
+            (:SET ((:REG "rsp") ,si) (reg acc)) ;; base register, displ  => -si(%rsp)
             ,@(comp expr1 (- si *word-size*) acc)
-            (:ADD ((:REG "rsp" ) ,si) (:REG ,acc))))
+            (:ADD ((:REG "rsp" ) ,si) (reg acc))))
 
        (t
         (error (make-condition 'scheme-compile-error
