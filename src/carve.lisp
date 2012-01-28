@@ -71,16 +71,18 @@
   (terpri *asm-output*))
 
 (defun immediate-rep (x)
-  (cond
-    ((integerp x) (ash x *fixnum-shift*))
-    ((null x) *empty-list*)
-    ((characterp x)
-     (logior (ash (char-code x) 8) #b00001111))
-    ((eql x '#t)
-     *scheme-t*)
-    ((eql x '#f)
-     *scheme-f*)
-    ))
+  (const
+   (cond
+     ((integerp x) (ash x *fixnum-shift*))
+     ((null x) *empty-list*)
+     ((characterp x)
+      (logior (ash (char-code x) 8) #b00001111))
+     ((eql x '#t)
+      *scheme-t*)
+     ((eql x '#f)
+      *scheme-f*)
+     (t (error "unknown immediate: ~a" x))
+     )))
 
 ;; 64 bit 
 ;; max: 9223372036854775807 (= 2^63 - 1)
@@ -265,8 +267,16 @@
 ;; jump
 ;; je
 
-(defun emit-mov (src dest &key (size "q"))
-  (emit "mov~a ~a, ~a" size src dest))
+(defun emit-mov (src dst &key (size "q"))
+  (emit "mov~a ~a, ~a" size src dst))
+
+(defun emit-add (src dst &key (size "q"))
+  ;; add src, dst # dst = dst + src
+  (emit "add~a ~a, ~a" size src dst))
+
+(defun emit-sub (src dst &key (size "q"))
+  ;; sub src, dst # dst = dst - src
+  (emit "sub~a ~a, ~a" size src dst))
 
 (defun asm-reg (r &key disp)
   (if disp
@@ -277,30 +287,28 @@
   (format nil "$~a" v))
 
 ;; now
-(defun emit-addressing (x)
-  (match dest
+(defun asm-addressing (x)
+  (match x
     ((:REG r)
      (asm-reg r))
     (((:REG r) disp)
      (asm-reg r :disp disp))
+    ((:CONST v)
+     (asm-const v))
     (t
-     (error "invalid dest"))))
+     (error "invalid addressing: ~a" x))))
+
+(defun asm-const-p (x)
+  (match x
+    ((:CONST v)
+     (declare (ignore v))
+     t)
+    (t nil)))
 
 (defun emit-set (dest src)
-  (let ((asm-dest (match dest
-                    ((:REG r)
-                     (asm-reg r))
-                    (((:REG r) disp)
-                     (asm-reg r :disp disp))
-                    (t
-                     (error "invalid dest"))))
-        (asm-src (match src
-                   ((:REG r)
-                    (asm-reg r))
-                   (((:REG r) disp)
-                    (asm-reg r :disp disp))
-                   (t
-                    (asm-const src)))))
+  (assert (not (asm-const-p dest)) (dest) "dest must be a register!")
+  (let ((asm-dest (asm-addressing dest))
+        (asm-src (asm-addressing src)))
     (emit-mov asm-src asm-dest)))
 
 (defun emit-asm (ir)
@@ -317,49 +325,44 @@
           ((:SET dest src)
            (emit-set dest src))
 
-          ((:ADD (:REG r1) (:REG r0))
-           (emit "addq %~a, %~a" r1 r0))
-          ((:ADD ((:REG r1) disp) (:REG r0))
-           (emit "addq ~a(%~a), %~a" disp r1 r0))
-
-          ((:ADD (:REG r1) ((:REG r0) disp))
-           (emit "addq %~a, ~a(%~a)" r1 disp r0))
-
           ((:ADD ((:REG r1) disp1) ((:REG r0) disp0)) ;; 存在しない命令
            (declare (ignore r1 disp1 r0 disp0))
            (error (make-condition 'scheme-compile-error
                                   :expr (car ir)
                                   :reason "Invalid compilation.src and dest are memory")))
 
-          ((:ADD v (:REG r))
-           (emit "addq $~a, %~a" v r))
+          ((:ADD a b)
+           (emit-add (asm-addressing a) (asm-addressing b)))
+          ((:SUB a b) ; a - b
+           (emit-sub (asm-addressing a) (asm-addressing b)))
 
-          ((:SUB (:REG r1) (:REG r0))
-           (emit "subq %~a, %~a" r1 r0))
-          ((:SUB v (:REG r))
-           (emit "subq $~a, %~a" v r))
-
-          ((:SHL v (:REG r))
+          ((:SHL (:CONST v) (:REG r))
            (emit "shlq $~a, %~a" v r))
-          ((:SHR v (:REG r))
+          ;; todo other SHL
+          ((:SHR (:CONST v) (:REG r))
            (emit "shrq $~a, %~a" v r))
-          ((:OR v (:REG r))
+          ;; todo other SHR
+          ((:OR (:CONST v) (:REG r))
            (emit "orq $~a, %~a" v r))
-          ((:AND v (:REG r))
+          ;; todo other OR
+          ((:AND (:CONST v) (:REG r))
            (emit "andq $~a, %~a" v r))
-          ((:CMP v (:REG r))
+          ;; todo other AND
+          ((:CMP (:CONST v) (:REG r))
            (emit "cmpq $~a, %~a" v r))
+          ;; todo other cmp
+          ((:SAL (:CONST v) (:REG r))
+           (emit "salq $~a, %~a" v r))
+          ;; todo other sal
           ((:SETE (:REG r))
            (emit "sete %~a" r))
-          ((:SAL v (:REG r))
-           (emit "salq $~a, %~a" v r))
+
           ((:JE label)
            (emit "je ~a" label))
           ((:JMP label)
            (emit "jmp ~a" label))
           ((:DEFLABEL label)
            (emit "~a:" label))
-
           (t
            (error "emit-asm error unmatch expression: ~a~%~a" (car ir) ir)))
         (emit-asm (cdr ir)))))
@@ -426,6 +429,9 @@
       `((:REG "rsp") ,disp)
       `(:REG ,r)))
 
+(defun const (v)
+  `(:CONST ,v))
+
 (defun comp-unary (expr si acc code)
   "generate unary primitive call."
   (seq (comp expr si acc) code))
@@ -441,6 +447,60 @@
        (gen insn (reg r2) (reg r1))
        (gen-set (reg acc) (reg r1))))))
 
+(defun comp-fixnum->char (expr si acc)
+  (comp-unary expr si acc
+              (seq (gen :SHL (const (- *char-shift* *fixnum-shift*)) (reg acc))
+                   (gen-or (const *char-tag*) (reg acc)))))
+
+(defun comp-char->fixnum (expr si acc)
+  (comp-unary expr si acc
+              (gen :SHR (const (- *char-shift* *fixnum-shift*)) (reg acc))))
+
+(defun comp-zero? (expr si acc)
+  (comp-unary expr si acc
+              (seq (gen :CMP (const 0) (reg acc))
+                   (gen-set (reg acc) (const 0))
+                   (gen :SETE (reg "al"))
+                   (gen :SAL (const 4) (reg acc))
+                   (gen-or (const *scheme-f*) (reg acc)))))
+
+(defun comp-null? (expr si acc)
+  (comp-unary expr si acc
+              (seq (gen :CMP (const *empty-list*) (reg acc))
+                   (gen-set (reg acc) (const 0))
+                   (gen :SETE (reg "al")) ;; fixme
+                   (gen :SAL (const 4) (reg acc))
+                   (gen-or (const *scheme-f*) (reg acc)))))
+
+(defun comp-boolean? (expr si acc)
+  (comp-unary expr si acc
+              (seq (gen-and (const *scheme-f*) (reg acc))
+                   (gen :CMP (const *scheme-f*) (reg acc))
+                   (gen-set (reg acc) (const 0))
+                   (gen :SETE (reg "al"))
+                   (gen :SAL (const 4) (reg acc))
+                   (gen-or (const *scheme-f*) (reg acc)))))
+
+(defun comp-fixnum? (expr si acc)
+  (comp-unary expr si acc
+              (seq (gen-and (const 3) (reg acc))
+                   (gen :CMP (const 0) (reg acc))
+                   (gen-set (reg acc) (const 0))
+                   (gen :SETE (reg "al"))
+                   (gen :SAL (const 4) (reg acc))
+                   (gen-or (const *scheme-f*) (reg acc)))))
+
+(defun comp-if (pred then else si acc)
+  (with-labels (alt-label end-label)
+    (seq (comp pred si acc)
+         (gen :CMP (const *scheme-f*) (reg acc))
+         (gen :JE alt-label)
+         (comp then si acc)
+         (gen :JMP end-label)
+         (gen-deflabel alt-label)
+         (comp else si acc)
+         (gen-deflabel end-label))))
+
 (defun comp (x si &optional (acc (gen-vreg)))
   "compile expression X into Carve IR."
   (cond
@@ -448,74 +508,23 @@
      (gen-set (reg acc) (immediate-rep x)))
     (t
      (match x
-       (('%add1 expr)
-        (comp-unary expr si acc (gen :ADD (gen-1) (reg acc))))
-       (('%sub1 expr)
-        (comp-unary expr si acc (gen :SUB (gen-1) (reg acc))))
-       (('%fixnum->char expr)
-        (comp-unary expr si acc
-                    (seq
-                     (gen :SHL (- *char-shift* *fixnum-shift*) (reg acc))
-                     (gen-or *char-tag* (reg acc)))))
-       (('%char->fixnum expr)
-        (comp-unary expr si acc
-                    (gen :SHR (- *char-shift* *fixnum-shift*) (reg acc))))
-       (('%zero? expr)
-        (comp-unary expr si acc
-                    (seq
-                     (gen :CMP 0 (reg acc))
-                     (gen-set (reg acc) 0)
-                     (gen :SETE (reg "al"))
-                     (gen :SAL 4 (reg acc))
-                     (gen-or *scheme-f* (reg acc)))))
-       (('%null? expr)
-        (comp-unary expr si acc
-                    (seq
-                     (gen :CMP *empty-list* (reg acc))
-                     (gen-set (reg acc) 0)
-                     (gen :SETE (reg "al")) ;; fixme
-                     (gen :SAL 4 (reg acc))
-                     (gen-or *scheme-f* (reg acc)))))
-       (('%boolean? expr)
-        (comp-unary expr si acc
-                    (seq 
-                     (gen-and *scheme-f* (reg acc))
-                     (gen :CMP *scheme-f* (reg acc))
-                     (gen-set (reg acc) 0)
-                     (gen :SETE (reg "al"))
-                     (gen :SAL 4 (reg acc))
-                     (gen-or *scheme-f* (reg acc)))))
-       (('%fixnum? expr)
-        (comp-unary expr si acc
-                    (seq
-                     (gen-and 3 (reg acc))
-                     (gen :CMP 0 (reg acc))
-                     (gen-set (reg acc) 0)
-                     (gen :SETE (reg "al"))
-                     (gen :SAL 4 (reg acc))
-                     (gen-or *scheme-f* (reg acc)))))
-       (('if test conseq altern)
-        (with-labels (alt-label end-label)
-          (seq
-           (comp test si acc)
-           (gen :CMP *scheme-f* (reg acc))
-           (gen :JE alt-label)
-           (comp conseq si acc)
-           (gen :JMP end-label)
-           (gen-deflabel alt-label)
-           (comp altern si acc)
-           (gen-deflabel end-label))))
-       (('%+ expr1 expr2)
-        (comp-add/sub '%+ expr1 expr2 si acc))
-       (('%- expr1 expr2)
-        (comp-add/sub '%- expr1 expr2 si acc))
-       (('plus expr1 expr2) ;; 
+       (('%add1 expr) (comp-unary expr si acc (gen :ADD (gen-1) (reg acc))))
+       (('%sub1 expr) (comp-unary expr si acc (gen :SUB (gen-1) (reg acc))))
+       (('%fixnum->char expr) (comp-fixnum->char expr si acc))
+       (('%char->fixnum expr) (comp-char->fixnum expr si acc))
+       (('%zero? expr) (comp-zero? expr si acc))
+       (('%null? expr) (comp-null? expr si acc))
+       (('%boolean? expr) (comp-boolean? expr si acc))
+       (('%fixnum? expr) (comp-fixnum? expr si acc))
+       (('if pred then else) (comp-if pred then else si acc))
+       (('%+ expr1 expr2) (comp-add/sub '%+ expr1 expr2 si acc))
+       (('%- expr1 expr2) (comp-add/sub '%- expr1 expr2 si acc))
+       (('plus expr1 expr2) ;; fixme or remove
         `(,@(comp expr2 si acc)
             ;; base register, displ  => -si(%rsp)
             (gen-set (reg "rsp" :disp si) (reg acc))
             ,@(comp expr1 (- si *word-size*) acc)
             (:ADD ((:REG "rsp" ) ,si) (reg acc))))
-
        (t
         (error (make-condition 'scheme-compile-error
                                :expr x :reason "unknown expr")))))))
