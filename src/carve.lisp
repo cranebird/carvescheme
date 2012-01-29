@@ -675,58 +675,12 @@
     ("#f" '(%fixnum? (%zero? 0)))
     ))
 
-;; (deftest test-unary-primitive ()
-;;   (check
-;;     (equal "1" (run '(%add1 0) nil))
-;;     (equal "2" (run '(%add1 1) nil))
-;;     (equal "0" (run '(%add1 -1) nil))
-;;     (equal "-1" (run '(%add1 -2) nil))
-;;     (equal "-2" (run '(%add1 -3) nil))
-;;     (equal "3" (run '(%add1 (%add1 (%add1 0))) nil))
-;;     (equal "1" (run '(%add1 (%sub1 (%add1 0))) nil))
-;;     (equal "#\\A" (run `(%fixnum->char ,(char-code #\A)) nil))
-;;     (equal "#\\l" (run `(%fixnum->char ,(char-code #\l)) nil))
-;;     (equal (format nil "~a" (char-code #\Z)) (run `(%char->fixnum #\Z) nil))
-;;     (equal "#t" (run '(%zero? 0) nil))
-;;     (equal "#f" (run '(%zero? 3) nil))
-;;     (equal "#t" (run '(%zero? (%add1 -1)) nil))
-;;     (equal "#f" (run '(%zero? (%sub1 -1)) nil))
-;;     (equal "#t" (run '(%zero? (%sub1 (%sub1 2))) nil))
-
-;;     (equal "#t" (run '(%null? nil) nil))
-;;     (equal "#f" (run '(%null? 3) nil))
-;;     (equal "#f" (run '(%null? 0) nil))
-
-;;     (equal "#t" (run '(%boolean? #t) nil))
-;;     (equal "#t" (run '(%boolean? #f) nil))
-;;     (equal "#f" (run '(%boolean? 4) nil))
-;;     (equal "#f" (run '(%boolean? -1) nil))
-;;     (equal "#f" (run '(%boolean? nil) nil))
-;;     (equal "#f" (run '(%boolean? #\a) nil))
-
-;;     (equal "#t" (run '(%fixnum? 0) nil))
-;;     (equal "#t" (run '(%fixnum? 4) nil))
-;;     (equal "#t" (run '(%fixnum? -2) nil))
-;;     (equal "#t" (run '(%fixnum? (%add1 -1)) nil))
-;;     (equal "#f" (run '(%fixnum? #t) nil))
-;;     (equal "#f" (run '(%fixnum? #f) nil))
-;;     (equal "#f" (run '(%fixnum? (%zero? 3)) nil))
-;;     (equal "#f" (run '(%fixnum? (%zero? 0)) nil))
-;;     ))
-
 (deftest test-unary-primitive-edge ()
   (check*
     ((format nil "~a" most-positive-immediate-integer)
      `(%add1 ,(1- most-positive-immediate-integer)))
     ((format nil "~a" most-negative-immediate-integer)
      `(%sub1 ,(1+ most-negative-immediate-integer)))))
-
-;; (deftest test-unary-primitive-edge ()
-;;   (check
-;;     (equal (format nil "~a" most-positive-immediate-integer)
-;;            (run `(%add1 ,(1- most-positive-immediate-integer)) nil))
-;;     (equal (format nil "~a" most-negative-immediate-integer)
-;;            (run `(%sub1 ,(1+ most-negative-immediate-integer)) nil))))
 
 (deftest test-if ()
   (check*
@@ -738,16 +692,6 @@
     ("9" '(if #f (%add1 5) (%add1 8)))
     ))
 
-;; (deftest test-if ()
-;;   (check
-;;     (equal "#t" (run '(if #t #t #f) nil))
-;;     (equal "#f" (run '(if #f #t #f) nil))
-;;     (equal "3" (run '(if #t 3 4) nil))
-;;     (equal "4" (run '(if #f 3 4) nil))
-;;     (equal "6" (run '(if #t (%add1 5) 4) nil))
-;;     (equal "9" (run '(if #f (%add1 5) (%add1 8)) nil))
-;;     ))
-
 (deftest test-+ ()
   (check*
     ("3" '(%+ 1 2))
@@ -758,17 +702,6 @@
     ("7" '(%+ (%add1 2) 4))
     ("8" '(%+ (%add1 2) (%add1 4)))
     ))
-
-;; (deftest test-+ ()
-;;   (check
-;;     (equal "3" (run '(%+ 1 2) nil))
-;;     (equal "4" (run '(%+ -1 5) nil))
-;;     (equal "10" (run '(%+ 10 0) nil))
-;;     (equal "7" (run '(%+ (%+ 1 2) 4)  nil))
-;;     (equal "7" (run '(%+ (%+ 1 2) (%+ 3 1))  nil))
-;;     (equal "7" (run '(%+ (%add1 2) 4)  nil))
-;;     (equal "8" (run '(%+ (%add1 2) (%add1 4))  nil))
-;;     ))
 
 (deftest test-high-register-pressure ()
   (check*
@@ -784,22 +717,6 @@
        (%+ (%+ 20 21) (%+ 22 23))))
     ))
 
-;; (deftest test-high-register-pressure ()
-;;   (check
-;;     (equal "105"
-;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)  nil))
-;;     (equal "120"
-;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15) nil))
-    
-;;     (equal "191"
-;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)
-;;                   (%+ (%+ 20 21) (%+ 22 23))) nil))
-
-;;     (equal "245"
-;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) (%+ 30 31)) 8) 9) 10) 11) 12) 13) 14)
-;;                   (%+ (%+ 20 21) (%+ 22 23))) nil))
-;;     ))
-    
 (deftest test-- ()
   (check*
     ("3" '(%- 4 1))
