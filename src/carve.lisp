@@ -66,11 +66,19 @@
                      (scheme-compile-error-expr condition)
                      (scheme-compile-error-reason condition)))))
 
+(defun comp-error (expr reason &rest args)
+  "Raise scheme-compile-error."
+  (error (make-condition 'scheme-compile-error
+                         :expr expr
+                         :reason (apply #'format nil reason args))))
+
 (defun emit (str &rest args)
+  "Emit assembler to *asm-output*."
   (apply 'format *asm-output* str args)
   (terpri *asm-output*))
 
 (defun immediate-rep (x)
+  "Return immediate representation of X."
   (const
    (cond
      ((integerp x) (ash x *fixnum-shift*))
@@ -98,20 +106,20 @@
   (- (expt 2 61)))
 
 (defun immediate-integer-p (x)
-  "return non-nil if X is immediate integer."
+  "Return non-nil if X is immediate integer."
   (and (integerp x)
        (<= most-negative-immediate-integer x)
        (<= x most-positive-immediate-integer)))
 
 (defun immediate-p (x)
-  "return non-nil if X is immediate object."
+  "Return non-nil if X is immediate object."
   (or (immediate-integer-p x) (null x)
       (characterp x)
       (eql x '#t)
       (eql x '#f)))
 
 (defun collect-register (ir)
-  "return list of register name in the IR."
+  "Return list of register name in the IR."
   (match ir
     ((:REG r) (list r))
     (t
@@ -124,7 +132,7 @@
 (defstruct liveness name start end)
 
 (defun analyze-liveness (ir)
-  "analyze liveness for IR. return list of (register start end)."
+  "Analyze liveness for IR and return list of liveness."
   (loop with exists = (make-hash-table)
      for insn in ir for i from 0
      for regs = (collect-register insn)
@@ -142,7 +150,7 @@
                              :end (apply #'max (gethash k exists)))))))
 
 (defun interference-p (liveness1 liveness2)
-  "return non-nil if liveness1 and liveness2 are inteferenced."
+  "Return non-nil if liveness1 and liveness2 are inteferenced."
   (let ((s1 (liveness-start liveness1))
         (e1 (liveness-end liveness1))
         (s2 (liveness-start liveness2))
@@ -177,6 +185,7 @@
      do (format t "~a => ~a~%" k (gethash k ht))))
 
 (defun replace-all-virtual-register (insn register location)
+  "Replace virtual register into physical register in IR."
   (match insn
     ((:REG r)
      (cond
@@ -192,15 +201,14 @@
                (replace-all-virtual-register (cdr insn) register location))
          insn))))
 
-(defun allocate-register (ir
-                          &optional (init-regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
-                                                     "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
+(defun allocate-register (ir phys-regs)
+  "Allocate physical resister for IR by linear scan register allocation."
   (let* ((liveness (sort (analyze-liveness ir) #'< :key #'liveness-start))
          (si (- *word-size*))  ;; fixme まっとうな手段で si を得ること
-         (r (length init-regs))
+         (r (length phys-regs))
          (register (make-hash-table :test #'equal))
          (location (make-hash-table :test #'equal)) 
-         (pool (copy-seq init-regs))
+         (pool (copy-seq phys-regs))
          (active nil))
     (labels ((startpoint (i) (liveness-start i))
              (endpoint (i) (liveness-end i))
@@ -278,15 +286,20 @@
   ;; sub src, dst # dst = dst - src
   (emit "sub~a ~a, ~a" size src dst))
 
+(defun emit-mul (src dst &key (size "q"))
+  ;; imulq src, dst # dst = dst * src
+  (emit "imul~a ~a, ~a" size src dst))
+
 (defun asm-reg (r &key disp)
+  "Generate asm for register R."
   (if disp
       (format nil "~a(%~a)" disp r)
       (format nil "%~a" r)))
 
 (defun asm-const (v)
+  "Generate asm immediate value."
   (format nil "$~a" v))
 
-;; now
 (defun asm-addressing (x)
   (match x
     ((:REG r)
@@ -299,6 +312,7 @@
      (error "invalid addressing: ~a" x))))
 
 (defun asm-const-p (x)
+  "Is the asm a CONST?"
   (match x
     ((:CONST v)
      (declare (ignore v))
@@ -312,6 +326,7 @@
     (emit-mov asm-src asm-dest)))
 
 (defun emit-asm (ir)
+  "Emit assembler of IR."
   (assert (or (null ir) (consp ir)) (ir) "emit-ir: except cons, but got: ~a" ir)
   (if (null ir)
       nil
@@ -319,22 +334,18 @@
         (match (car ir)
           ((:SET ((:REG r0) disp0) ((:REG r1) disp1)) ;; 存在しない命令
            (declare (ignore r0 disp0 r1 disp1))
-           (error (make-condition 'scheme-compile-error
-                                  :expr (car ir)
-                                  :reason "Invalid compilation.src and dest are memory")))
+           (comp-error (car ir) "Invalid compilation.src and dest are memory"))
           ((:SET dest src)
            (emit-set dest src))
-
           ((:ADD ((:REG r1) disp1) ((:REG r0) disp0)) ;; 存在しない命令
            (declare (ignore r1 disp1 r0 disp0))
-           (error (make-condition 'scheme-compile-error
-                                  :expr (car ir)
-                                  :reason "Invalid compilation.src and dest are memory")))
-
+           (comp-error (car ir) "Invalid compilation.src and dest are memory"))
           ((:ADD a b)
            (emit-add (asm-addressing a) (asm-addressing b)))
           ((:SUB a b) ; a - b
            (emit-sub (asm-addressing a) (asm-addressing b)))
+          ((:MUL a b) ; a * b
+           (emit-mul (asm-addressing a) (asm-addressing b)))
 
           ((:SHL (:CONST v) (:REG r))
            (emit "shlq $~a, %~a" v r))
@@ -364,14 +375,15 @@
           ((:DEFLABEL label)
            (emit "~a:" label))
           (t
-           (error "emit-asm error unmatch expression: ~a~%~a" (car ir) ir)))
+           (comp-error (car ir) "emit-asm error unmatch expression: ~a" ir)))
         (emit-asm (cdr ir)))))
 
 (defun gen-label ()
+  "Generate an asm label."
   (gensym "Label"))
 
 (defun gen-vreg ()
-  "create symbol for virtual register."
+  "Return new symbol for virtual register."
   (gensym "reg"))
 
 (defmacro with-vregs ((&rest regs) &body body)
@@ -398,14 +410,14 @@
 (defun label-symbol-p (x)
   (specific-symbol-p x "Label"))
 
-
 ;; IR
-
+;; seq, gen is from PAIP Chapter 23.
 (defun seq (&rest code)
-  "return a sequence of instruction."
+  "Return a sequence of instruction."
   (apply #'append code))
 
 (defun gen (opcode &rest args)
+  "Generate a single instruction."
   (list (cons opcode args)))
 
 (defun gen-1 ()
@@ -424,35 +436,25 @@
   (gen :OR a b))
 
 (defun reg (r &key disp)
-  "return part of instruction refer the register R."
+  "Return instruction refer the register R."
   (if disp
       `((:REG "rsp") ,disp)
       `(:REG ,r)))
 
 (defun const (v)
+  "Return instruction for constant value V."
   `(:CONST ,v))
 
 (defun comp-unary (expr si acc code)
-  "generate unary primitive call."
+  "Compile unary-primitive EXPR."
   (seq (comp expr si acc) code))
 
 (defmacro def-unary-prim (name (expr si acc) &body body)
-  "define unary primitive compiler."
+  "Define unary primitive compiler."
   (let ((code (gensym)))
     `(defun ,name (,expr ,si ,acc)
        (let ((,code (seq ,@body)))
          (comp-unary ,expr ,si ,acc ,code)))))
-
-(defun comp-add/sub (op expr1 expr2 si acc)
-  (let ((insn (ecase op
-                ((%+) :ADD)
-                ((%-) :SUB))))
-    (with-vregs (r1 r2)
-      (seq
-       (comp expr2 si r2)
-       (comp expr1 si r1)
-       (gen insn (reg r2) (reg r1))
-       (gen-set (reg acc) (reg r1))))))
 
 (def-unary-prim comp-fixnum->char (expr si acc)
   (gen :SHL (const (- *char-shift* *fixnum-shift*)) (reg acc))
@@ -502,8 +504,29 @@
          (comp else si acc)
          (gen-deflabel end-label))))
 
+(defun comp-add/sub (op expr1 expr2 si acc)
+  (let ((insn (ecase op
+                ((%+) :ADD)
+                ((%-) :SUB))))
+    (with-vregs (r1 r2)
+      (seq
+       (comp expr2 si r2)
+       (comp expr1 si r1)
+       (gen insn (reg r2) (reg r1))
+       (gen-set (reg acc) (reg r1))))))
+
+(defun comp-mul (expr1 expr2 si acc)
+  (with-vregs (r1 r2)
+    (seq
+     ;; 4xy = 4x * (4y / 4)
+     (comp expr2 si r2)
+     (gen :SHR (const *fixnum-shift*) (reg r2))
+     (comp expr1 si r1)
+     (gen :MUL (reg r2) (reg r1))
+     (gen-set (reg acc) (reg r1)))))
+
 (defun comp (x si &optional (acc (gen-vreg)))
-  "compile expression X into Carve IR."
+  "Compile expression X and return Carve IR."
   (cond
     ((immediate-p x)
      (gen-set (reg acc) (immediate-rep x)))
@@ -520,6 +543,7 @@
        (('if pred then else) (comp-if pred then else si acc))
        (('%+ expr1 expr2) (comp-add/sub '%+ expr1 expr2 si acc))
        (('%- expr1 expr2) (comp-add/sub '%- expr1 expr2 si acc))
+       (('%* expr1 expr2) (comp-mul expr1 expr2 si acc))
 
        (('plus expr1 expr2) ;; fixme or remove
         `(,@(comp expr2 si acc)
@@ -542,9 +566,11 @@
            (format *terminal-io* ";;; Carve IR ~a~%" stage)
            (dump-ir ir *terminal-io*)))
     (emit-header)
-    (let* ((si (- *word-size*))
+    (let* ((init-regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
+                            "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15"))
+           (si (- *word-size*))
            (ir0 (comp x si "rax"))
-           (ir1 (allocate-register ir0))
+           (ir1 (allocate-register ir0 init-regs))
            ;;(ir1 (allocate-register ir0 (list "rbx" "rcx")))
            )
       (print-info ir0 "IR0")
@@ -554,6 +580,7 @@
       (emit "ret"))))
 
 (defun write-asm (x)
+  "Compile s-expression X and write to *asm-file*"
   (with-open-file (*asm-output* *asm-file* :direction :output :if-exists :supersede)
     (compile-program x)))
 
@@ -577,7 +604,7 @@
   (defcfun "scheme_entry" :int64))
 
 (defun format-scheme-value (val)
-  "printer"
+  "Printer. *not used*"
   (cond
     ((eql (logand val *fixnum-mask*) *fixnum-tag*)
      (ash val (- *fixnum-shift*)))
@@ -612,118 +639,6 @@
 ;;   (load-scheme-entry)
 ;;   (let ((val (scheme-entry)))
 ;;     (format out "~a" (format-scheme-value val))))
-
-(defun run* (x)
-  (run x nil))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; test
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(defmacro check* (&rest rest)
-  `(check
-     ,@(loop for (expect exp) in rest
-          collect `(equal ,expect (run ,exp nil)))))
-
-(deftest test-immediate ()
-  (check*
-    ("13" 13)
-    ("7" 7)
-    ("()" nil)
-    ("#\\A" #\A)
-    ("#\\1" #\1)
-    ("#\\9" #\9)
-    ("#t" '#t)
-    ("#f" '#f)))
-
-(deftest test-unary-primitive ()
-  (check*
-    ("1" '(%add1 0))
-    ("2" '(%add1 1))
-    ("0" '(%add1 -1))
-    ("-1" '(%add1 -2))
-    ("-2" '(%add1 -3))
-    ("3" '(%add1 (%add1 (%add1 0))))
-    ("1" '(%add1 (%sub1 (%add1 0))))
-    ("#\\A" `(%fixnum->char ,(char-code #\A)))
-    ("#\\l" `(%fixnum->char ,(char-code #\l)))
-    ((format nil "~a" (char-code #\Z)) `(%char->fixnum #\Z))
-    ("#t" '(%zero? 0))
-    ("#f" '(%zero? 3))
-    ("#t" '(%zero? (%add1 -1)))
-    ("#f" '(%zero? (%sub1 -1)))
-    ("#t" '(%zero? (%sub1 (%sub1 2))))
-
-    ("#t" '(%null? nil))
-    ("#f" '(%null? 3))
-    ("#f" '(%null? 0))
-
-    ("#t" '(%boolean? #t))
-    ("#t" '(%boolean? #f))
-    ("#f" '(%boolean? 4))
-    ("#f" '(%boolean? -1))
-    ("#f" '(%boolean? nil))
-    ("#f" '(%boolean? #\a))
-
-    ("#t" '(%fixnum? 0))
-    ("#t" '(%fixnum? 4))
-    ("#t" '(%fixnum? -2))
-    ("#t" '(%fixnum? (%add1 -1)))
-    ("#f" '(%fixnum? #t))
-    ("#f" '(%fixnum? #f))
-    ("#f" '(%fixnum? (%zero? 3)))
-    ("#f" '(%fixnum? (%zero? 0)))
-    ))
-
-(deftest test-unary-primitive-edge ()
-  (check*
-    ((format nil "~a" most-positive-immediate-integer)
-     `(%add1 ,(1- most-positive-immediate-integer)))
-    ((format nil "~a" most-negative-immediate-integer)
-     `(%sub1 ,(1+ most-negative-immediate-integer)))))
-
-(deftest test-if ()
-  (check*
-    ("#t" '(if #t #t #f))
-    ("#f" '(if #f #t #f))
-    ("3" '(if #t 3 4))
-    ("4" '(if #f 3 4))
-    ("6" '(if #t (%add1 5) 4))
-    ("9" '(if #f (%add1 5) (%add1 8)))
-    ))
-
-(deftest test-+ ()
-  (check*
-    ("3" '(%+ 1 2))
-    ("4" '(%+ -1 5))
-    ("10" '(%+ 10 0))
-    ("7" '(%+ (%+ 1 2) 4))
-    ("7" '(%+ (%+ 1 2) (%+ 3 1)))
-    ("7" '(%+ (%add1 2) 4))
-    ("8" '(%+ (%add1 2) (%add1 4)))
-    ))
-
-(deftest test-high-register-pressure ()
-  (check*
-    ("105"
-     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14))
-    ("120"
-     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15))
-    ("191"
-     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)
-       (%+ (%+ 20 21) (%+ 22 23))))
-    ("245"
-     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) (%+ 30 31)) 8) 9) 10) 11) 12) 13) 14)
-       (%+ (%+ 20 21) (%+ 22 23))))
-    ))
-
-(deftest test-- ()
-  (check*
-    ("3" '(%- 4 1))
-    ("-1" '(%- 1 2))
-    ("-6" '(%- -1 5))
-    ("10" '(%- 10 0))
-    ))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
