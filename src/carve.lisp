@@ -81,8 +81,7 @@
       *scheme-t*)
      ((eql x '#f)
       *scheme-f*)
-     (t (error "unknown immediate: ~a" x))
-     )))
+     (t (error "unknown immediate: ~a" x)))))
 
 ;; 64 bit 
 ;; max: 9223372036854775807 (= 2^63 - 1)
@@ -193,8 +192,9 @@
                (replace-all-virtual-register (cdr insn) register location))
          insn))))
 
-(defun allocate-register (ir &optional (init-regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
-                                                        "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
+(defun allocate-register (ir
+                          &optional (init-regs (list "rbx" "rcx" "rdx" "rdi" "rsi"
+                                                     "r8" "r9" "r10" "r11" "r12" "r13" "r14" "r15")))
   (let* ((liveness (sort (analyze-liveness ir) #'< :key #'liveness-start))
          (si (- *word-size*))  ;; fixme まっとうな手段で si を得ること
          (r (length init-regs))
@@ -436,6 +436,13 @@
   "generate unary primitive call."
   (seq (comp expr si acc) code))
 
+(defmacro def-unary-prim (name (expr si acc) &body body)
+  "define unary primitive compiler."
+  (let ((code (gensym)))
+    `(defun ,name (,expr ,si ,acc)
+       (let ((,code (seq ,@body)))
+         (comp-unary ,expr ,si ,acc ,code)))))
+
 (defun comp-add/sub (op expr1 expr2 si acc)
   (let ((insn (ecase op
                 ((%+) :ADD)
@@ -447,48 +454,42 @@
        (gen insn (reg r2) (reg r1))
        (gen-set (reg acc) (reg r1))))))
 
-(defun comp-fixnum->char (expr si acc)
-  (comp-unary expr si acc
-              (seq (gen :SHL (const (- *char-shift* *fixnum-shift*)) (reg acc))
-                   (gen-or (const *char-tag*) (reg acc)))))
+(def-unary-prim comp-fixnum->char (expr si acc)
+  (gen :SHL (const (- *char-shift* *fixnum-shift*)) (reg acc))
+  (gen-or (const *char-tag*) (reg acc)))
 
-(defun comp-char->fixnum (expr si acc)
-  (comp-unary expr si acc
-              (gen :SHR (const (- *char-shift* *fixnum-shift*)) (reg acc))))
+(def-unary-prim comp-char->fixnum (expr si acc)
+  (gen :SHR (const (- *char-shift* *fixnum-shift*)) (reg acc)))
 
-(defun comp-zero? (expr si acc)
-  (comp-unary expr si acc
-              (seq (gen :CMP (const 0) (reg acc))
-                   (gen-set (reg acc) (const 0))
-                   (gen :SETE (reg "al"))
-                   (gen :SAL (const 4) (reg acc))
-                   (gen-or (const *scheme-f*) (reg acc)))))
+(def-unary-prim comp-zero? (expr si acc)
+  (gen :CMP (const 0) (reg acc))
+  (gen-set (reg acc) (const 0))
+  (gen :SETE (reg "al"))
+  (gen :SAL (const 4) (reg acc))
+  (gen-or (const *scheme-f*) (reg acc)))
 
-(defun comp-null? (expr si acc)
-  (comp-unary expr si acc
-              (seq (gen :CMP (const *empty-list*) (reg acc))
-                   (gen-set (reg acc) (const 0))
-                   (gen :SETE (reg "al")) ;; fixme
-                   (gen :SAL (const 4) (reg acc))
-                   (gen-or (const *scheme-f*) (reg acc)))))
+(def-unary-prim comp-null? (expr si acc)
+  (gen :CMP (const *empty-list*) (reg acc))
+  (gen-set (reg acc) (const 0))
+  (gen :SETE (reg "al")) ;; fixme
+  (gen :SAL (const 4) (reg acc))
+  (gen-or (const *scheme-f*) (reg acc)))
 
-(defun comp-boolean? (expr si acc)
-  (comp-unary expr si acc
-              (seq (gen-and (const *scheme-f*) (reg acc))
-                   (gen :CMP (const *scheme-f*) (reg acc))
-                   (gen-set (reg acc) (const 0))
-                   (gen :SETE (reg "al"))
-                   (gen :SAL (const 4) (reg acc))
-                   (gen-or (const *scheme-f*) (reg acc)))))
+(def-unary-prim comp-boolean? (expr si acc)
+  (gen-and (const *scheme-f*) (reg acc))
+  (gen :CMP (const *scheme-f*) (reg acc))
+  (gen-set (reg acc) (const 0))
+  (gen :SETE (reg "al"))
+  (gen :SAL (const 4) (reg acc))
+  (gen-or (const *scheme-f*) (reg acc)))
 
-(defun comp-fixnum? (expr si acc)
-  (comp-unary expr si acc
-              (seq (gen-and (const 3) (reg acc))
-                   (gen :CMP (const 0) (reg acc))
-                   (gen-set (reg acc) (const 0))
-                   (gen :SETE (reg "al"))
-                   (gen :SAL (const 4) (reg acc))
-                   (gen-or (const *scheme-f*) (reg acc)))))
+(def-unary-prim comp-fixnum? (expr si acc)
+  (gen-and (const 3) (reg acc))
+  (gen :CMP (const 0) (reg acc))
+  (gen-set (reg acc) (const 0))
+  (gen :SETE (reg "al"))
+  (gen :SAL (const 4) (reg acc))
+  (gen-or (const *scheme-f*) (reg acc)))
 
 (defun comp-if (pred then else si acc)
   (with-labels (alt-label end-label)
@@ -519,6 +520,7 @@
        (('if pred then else) (comp-if pred then else si acc))
        (('%+ expr1 expr2) (comp-add/sub '%+ expr1 expr2 si acc))
        (('%- expr1 expr2) (comp-add/sub '%- expr1 expr2 si acc))
+
        (('plus expr1 expr2) ;; fixme or remove
         `(,@(comp expr2 si acc)
             ;; base register, displ  => -si(%rsp)
@@ -549,24 +551,24 @@
       (print-info ir1 "IR1")
       (emit-asm ir1)
 
-      (emit "ret")
-      )))
+      (emit "ret"))))
 
 (defun write-asm (x)
   (with-open-file (*asm-output* *asm-file* :direction :output :if-exists :supersede)
     (compile-program x)))
 
 (defun make-scheme-library ()
-  (sb-ext:run-program "/usr/bin/gcc"
-                      `("-g" "-shared" ,*asm-file* "-o" ,*scheme-entry-lib-file*) 
-                      :error *scheme-entry-error-file* :if-error-exists :supersede
-                      :output *scheme-entry-output-file*  :if-output-exists :supersede))
+  (let ((program "/usr/bin/gcc")
+        (args `("-g" "-shared" ,*asm-file* "-o" ,*scheme-entry-lib-file*)))
+    (sb-ext:run-program program args
+                        :error *scheme-entry-error-file*
+                        :if-error-exists :supersede
+                        :output *scheme-entry-output-file*
+                        :if-output-exists :supersede)))
 
 (defun make-scheme-exe ()
-  (let ((proc
-         (sb-ext:run-program "/usr/bin/gcc"
-                             `("-g" ,*asm-file* ,*scheme-driver-c-file* "-o" ,*scheme-driver-exe*)
-                             :error *terminal-io*)))
+  (let* ((args `("-g" ,*asm-file* ,*scheme-driver-c-file* "-o" ,*scheme-driver-exe*))
+         (proc (sb-ext:run-program "/usr/bin/gcc" args :error *terminal-io*)))
     (unless (= 0 (sb-ext:process-exit-code proc))
       (error "make-scheme-exe exit"))))
 
@@ -618,109 +620,194 @@
 ;; test
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defmacro check* (&rest rest)
+  `(check
+     ,@(loop for (expect exp) in rest
+          collect `(equal ,expect (run ,exp nil)))))
+
 (deftest test-immediate ()
-  (check
-    (equal "13" (run 13 nil))
-    (equal "7" (run 7 nil))
-    (equal "()" (run nil nil))
-    (equal "#\\A" (run #\A nil))
-    (equal "#\\1" (run #\1 nil))
-    (equal "#\\9" (run #\9 nil))
-    (equal "#t" (run '#t nil))
-    (equal "#f" (run '#f nil))
-    ))
+  (check*
+    ("13" 13)
+    ("7" 7)
+    ("()" nil)
+    ("#\\A" #\A)
+    ("#\\1" #\1)
+    ("#\\9" #\9)
+    ("#t" '#t)
+    ("#f" '#f)))
 
 (deftest test-unary-primitive ()
-  (check
-    (equal "1" (run '(%add1 0) nil))
-    (equal "2" (run '(%add1 1) nil))
-    (equal "0" (run '(%add1 -1) nil))
-    (equal "-1" (run '(%add1 -2) nil))
-    (equal "-2" (run '(%add1 -3) nil))
-    (equal "3" (run '(%add1 (%add1 (%add1 0))) nil))
-    (equal "1" (run '(%add1 (%sub1 (%add1 0))) nil))
-    (equal "#\\A" (run `(%fixnum->char ,(char-code #\A)) nil))
-    (equal "#\\l" (run `(%fixnum->char ,(char-code #\l)) nil))
-    (equal (format nil "~a" (char-code #\Z)) (run `(%char->fixnum #\Z) nil))
-    (equal "#t" (run '(%zero? 0) nil))
-    (equal "#f" (run '(%zero? 3) nil))
-    (equal "#t" (run '(%zero? (%add1 -1)) nil))
-    (equal "#f" (run '(%zero? (%sub1 -1)) nil))
-    (equal "#t" (run '(%zero? (%sub1 (%sub1 2))) nil))
+  (check*
+    ("1" '(%add1 0))
+    ("2" '(%add1 1))
+    ("0" '(%add1 -1))
+    ("-1" '(%add1 -2))
+    ("-2" '(%add1 -3))
+    ("3" '(%add1 (%add1 (%add1 0))))
+    ("1" '(%add1 (%sub1 (%add1 0))))
+    ("#\\A" `(%fixnum->char ,(char-code #\A)))
+    ("#\\l" `(%fixnum->char ,(char-code #\l)))
+    ((format nil "~a" (char-code #\Z)) `(%char->fixnum #\Z))
+    ("#t" '(%zero? 0))
+    ("#f" '(%zero? 3))
+    ("#t" '(%zero? (%add1 -1)))
+    ("#f" '(%zero? (%sub1 -1)))
+    ("#t" '(%zero? (%sub1 (%sub1 2))))
 
-    (equal "#t" (run '(%null? nil) nil))
-    (equal "#f" (run '(%null? 3) nil))
-    (equal "#f" (run '(%null? 0) nil))
+    ("#t" '(%null? nil))
+    ("#f" '(%null? 3))
+    ("#f" '(%null? 0))
 
-    (equal "#t" (run '(%boolean? #t) nil))
-    (equal "#t" (run '(%boolean? #f) nil))
-    (equal "#f" (run '(%boolean? 4) nil))
-    (equal "#f" (run '(%boolean? -1) nil))
-    (equal "#f" (run '(%boolean? nil) nil))
-    (equal "#f" (run '(%boolean? #\a) nil))
+    ("#t" '(%boolean? #t))
+    ("#t" '(%boolean? #f))
+    ("#f" '(%boolean? 4))
+    ("#f" '(%boolean? -1))
+    ("#f" '(%boolean? nil))
+    ("#f" '(%boolean? #\a))
 
-    (equal "#t" (run '(%fixnum? 0) nil))
-    (equal "#t" (run '(%fixnum? 4) nil))
-    (equal "#t" (run '(%fixnum? -2) nil))
-    (equal "#t" (run '(%fixnum? (%add1 -1)) nil))
-    (equal "#f" (run '(%fixnum? #t) nil))
-    (equal "#f" (run '(%fixnum? #f) nil))
-    (equal "#f" (run '(%fixnum? (%zero? 3)) nil))
-    (equal "#f" (run '(%fixnum? (%zero? 0)) nil))
+    ("#t" '(%fixnum? 0))
+    ("#t" '(%fixnum? 4))
+    ("#t" '(%fixnum? -2))
+    ("#t" '(%fixnum? (%add1 -1)))
+    ("#f" '(%fixnum? #t))
+    ("#f" '(%fixnum? #f))
+    ("#f" '(%fixnum? (%zero? 3)))
+    ("#f" '(%fixnum? (%zero? 0)))
     ))
+
+;; (deftest test-unary-primitive ()
+;;   (check
+;;     (equal "1" (run '(%add1 0) nil))
+;;     (equal "2" (run '(%add1 1) nil))
+;;     (equal "0" (run '(%add1 -1) nil))
+;;     (equal "-1" (run '(%add1 -2) nil))
+;;     (equal "-2" (run '(%add1 -3) nil))
+;;     (equal "3" (run '(%add1 (%add1 (%add1 0))) nil))
+;;     (equal "1" (run '(%add1 (%sub1 (%add1 0))) nil))
+;;     (equal "#\\A" (run `(%fixnum->char ,(char-code #\A)) nil))
+;;     (equal "#\\l" (run `(%fixnum->char ,(char-code #\l)) nil))
+;;     (equal (format nil "~a" (char-code #\Z)) (run `(%char->fixnum #\Z) nil))
+;;     (equal "#t" (run '(%zero? 0) nil))
+;;     (equal "#f" (run '(%zero? 3) nil))
+;;     (equal "#t" (run '(%zero? (%add1 -1)) nil))
+;;     (equal "#f" (run '(%zero? (%sub1 -1)) nil))
+;;     (equal "#t" (run '(%zero? (%sub1 (%sub1 2))) nil))
+
+;;     (equal "#t" (run '(%null? nil) nil))
+;;     (equal "#f" (run '(%null? 3) nil))
+;;     (equal "#f" (run '(%null? 0) nil))
+
+;;     (equal "#t" (run '(%boolean? #t) nil))
+;;     (equal "#t" (run '(%boolean? #f) nil))
+;;     (equal "#f" (run '(%boolean? 4) nil))
+;;     (equal "#f" (run '(%boolean? -1) nil))
+;;     (equal "#f" (run '(%boolean? nil) nil))
+;;     (equal "#f" (run '(%boolean? #\a) nil))
+
+;;     (equal "#t" (run '(%fixnum? 0) nil))
+;;     (equal "#t" (run '(%fixnum? 4) nil))
+;;     (equal "#t" (run '(%fixnum? -2) nil))
+;;     (equal "#t" (run '(%fixnum? (%add1 -1)) nil))
+;;     (equal "#f" (run '(%fixnum? #t) nil))
+;;     (equal "#f" (run '(%fixnum? #f) nil))
+;;     (equal "#f" (run '(%fixnum? (%zero? 3)) nil))
+;;     (equal "#f" (run '(%fixnum? (%zero? 0)) nil))
+;;     ))
 
 (deftest test-unary-primitive-edge ()
-  (check
-    (equal (format nil "~a" most-positive-immediate-integer)
-           (run `(%add1 ,(1- most-positive-immediate-integer)) nil))
-    (equal (format nil "~a" most-negative-immediate-integer)
-           (run `(%sub1 ,(1+ most-negative-immediate-integer)) nil))))
+  (check*
+    ((format nil "~a" most-positive-immediate-integer)
+     `(%add1 ,(1- most-positive-immediate-integer)))
+    ((format nil "~a" most-negative-immediate-integer)
+     `(%sub1 ,(1+ most-negative-immediate-integer)))))
+
+;; (deftest test-unary-primitive-edge ()
+;;   (check
+;;     (equal (format nil "~a" most-positive-immediate-integer)
+;;            (run `(%add1 ,(1- most-positive-immediate-integer)) nil))
+;;     (equal (format nil "~a" most-negative-immediate-integer)
+;;            (run `(%sub1 ,(1+ most-negative-immediate-integer)) nil))))
 
 (deftest test-if ()
-  (check
-    (equal "#t" (run '(if #t #t #f) nil))
-    (equal "#f" (run '(if #f #t #f) nil))
-    (equal "3" (run '(if #t 3 4) nil))
-    (equal "4" (run '(if #f 3 4) nil))
-    (equal "6" (run '(if #t (%add1 5) 4) nil))
-    (equal "9" (run '(if #f (%add1 5) (%add1 8)) nil))
+  (check*
+    ("#t" '(if #t #t #f))
+    ("#f" '(if #f #t #f))
+    ("3" '(if #t 3 4))
+    ("4" '(if #f 3 4))
+    ("6" '(if #t (%add1 5) 4))
+    ("9" '(if #f (%add1 5) (%add1 8)))
     ))
+
+;; (deftest test-if ()
+;;   (check
+;;     (equal "#t" (run '(if #t #t #f) nil))
+;;     (equal "#f" (run '(if #f #t #f) nil))
+;;     (equal "3" (run '(if #t 3 4) nil))
+;;     (equal "4" (run '(if #f 3 4) nil))
+;;     (equal "6" (run '(if #t (%add1 5) 4) nil))
+;;     (equal "9" (run '(if #f (%add1 5) (%add1 8)) nil))
+;;     ))
 
 (deftest test-+ ()
-  (check
-    (equal "3" (run '(%+ 1 2) nil))
-    (equal "4" (run '(%+ -1 5) nil))
-    (equal "10" (run '(%+ 10 0) nil))
-    (equal "7" (run '(%+ (%+ 1 2) 4)  nil))
-    (equal "7" (run '(%+ (%+ 1 2) (%+ 3 1))  nil))
-    (equal "7" (run '(%+ (%add1 2) 4)  nil))
-    (equal "8" (run '(%+ (%add1 2) (%add1 4))  nil))
-
+  (check*
+    ("3" '(%+ 1 2))
+    ("4" '(%+ -1 5))
+    ("10" '(%+ 10 0))
+    ("7" '(%+ (%+ 1 2) 4))
+    ("7" '(%+ (%+ 1 2) (%+ 3 1)))
+    ("7" '(%+ (%add1 2) 4))
+    ("8" '(%+ (%add1 2) (%add1 4)))
     ))
+
+;; (deftest test-+ ()
+;;   (check
+;;     (equal "3" (run '(%+ 1 2) nil))
+;;     (equal "4" (run '(%+ -1 5) nil))
+;;     (equal "10" (run '(%+ 10 0) nil))
+;;     (equal "7" (run '(%+ (%+ 1 2) 4)  nil))
+;;     (equal "7" (run '(%+ (%+ 1 2) (%+ 3 1))  nil))
+;;     (equal "7" (run '(%+ (%add1 2) 4)  nil))
+;;     (equal "8" (run '(%+ (%add1 2) (%add1 4))  nil))
+;;     ))
 
 (deftest test-high-register-pressure ()
-  (check
-    (equal "105"
-           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)  nil))
-    (equal "120"
-           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15) nil))
-    
-    (equal "191"
-           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)
-                  (%+ (%+ 20 21) (%+ 22 23))) nil))
-
-    (equal "245"
-           (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) (%+ 30 31)) 8) 9) 10) 11) 12) 13) 14)
-                  (%+ (%+ 20 21) (%+ 22 23))) nil))
+  (check*
+    ("105"
+     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14))
+    ("120"
+     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15))
+    ("191"
+     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)
+       (%+ (%+ 20 21) (%+ 22 23))))
+    ("245"
+     '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) (%+ 30 31)) 8) 9) 10) 11) 12) 13) 14)
+       (%+ (%+ 20 21) (%+ 22 23))))
     ))
+
+;; (deftest test-high-register-pressure ()
+;;   (check
+;;     (equal "105"
+;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)  nil))
+;;     (equal "120"
+;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14) 15) nil))
+    
+;;     (equal "191"
+;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) 7) 8) 9) 10) 11) 12) 13) 14)
+;;                   (%+ (%+ 20 21) (%+ 22 23))) nil))
+
+;;     (equal "245"
+;;            (run '(%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ (%+ 1 2) 3) 4) 5) 6) (%+ 30 31)) 8) 9) 10) 11) 12) 13) 14)
+;;                   (%+ (%+ 20 21) (%+ 22 23))) nil))
+;;     ))
     
 (deftest test-- ()
-  (check
-    (equal "3" (run '(%- 4 1) nil))
-    (equal "-1" (run '(%- 1 2) nil))
-    (equal "-6" (run '(%- -1 5) nil))
-    (equal "10" (run '(%- 10 0) nil))
+  (check*
+    ("3" '(%- 4 1))
+    ("-1" '(%- 1 2))
+    ("-6" '(%- -1 5))
+    ("10" '(%- 10 0))
     ))
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility
